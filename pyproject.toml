@@ -10,9 +10,15 @@ repository = "https://github.com/Barnard-PL-Labs/cloudcap"
 [tool.poetry.dependencies]
 python = "^3.11"
 typer = {extras = ["all"], version = "^0.12.0"}
+pyyaml = "^6.0.1"
+networkx = "^3.2.1"
+cfn-flip = "^1.3.0"
 
 [tool.poetry.scripts]
 cloudcap = 'cloudcap.__main__:main'
+
+[tool.poetry.group.dev.dependencies]
+sphinx = "^7.2.6"
 
 [build-system]
 requires = ["poetry-core"]

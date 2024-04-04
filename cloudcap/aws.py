@@ -1,5 +1,6 @@
 import logging
 import abc
+from cloudcap.cloudformation import CloudFormationStack
 
 logger = logging.getLogger(__name__)
 
@@ -32,8 +33,8 @@ class Deployment:
         self.region = region
         self.account_id = account_id
 
-    def from_cfn(self, cfn):
-        logger.debug("start deployment from cfn")
+    def from_cloudformation_template(self, fpath):
+        CloudFormationStack.from_file(fpath)
 
 
 ##### Regions and Partitions
@@ -101,12 +102,12 @@ class AWSSQSQueue(Resource):
 
     @property
     def arn(self):
-        return Arn.AWSSQSQueueARN(
+        return Arn.AWSSQSQueueArn(
             region=self.region, account_id=self.account_id, queue_name=self.queue_name
         )
 
     @staticmethod
-    def from_cfn():
+    def from_cfn(*, aws, region, account_id, cfn):
         raise NotImplementedError
 
 
@@ -119,5 +120,5 @@ class Arn:
         return f"arn:{region.partition}:lambda:{region}:{account_id}:function:{function_name}"
 
     @staticmethod
-    def AWSSQSQueueARN(*, region, account_id, queue_name):
+    def AWSSQSQueueArn(*, region, account_id, queue_name):
         return f"arn:{region.partition}:sqs:{region}:{account_id}:{queue_name}"
