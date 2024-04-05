@@ -20,17 +20,9 @@ def value_exists_in_nested_structure(structure, value):
     elif isinstance(structure, list):
         # Recursively search in each element of the list
         for item in structure:
+            if item == value:
+                return True
             if value_exists_in_nested_structure(item, value):
                 return True
     # If the value is not found in the current level, return False
     return False
-
-
-# Example usage:
-nested_structure = {
-    "a": [{"b": [1, 2, 3]}, {"c": {"d": 4, "e": [5, 6]}}, {"f": 7}],
-    "g": [{"h": 8}],
-}
-
-print(value_exists_in_nested_structure(nested_structure, 3))  # Output: True
-print(value_exists_in_nested_structure(nested_structure, 9))  # Output: False

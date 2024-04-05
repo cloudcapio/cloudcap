@@ -4,7 +4,6 @@ import logging
 import typer
 from cloudcap import __app_name__, __version__
 from cloudcap.aws import AWS, Regions
-import cloudcap.cloudformation as cloudformation
 
 app = typer.Typer()
 
@@ -54,4 +53,4 @@ def check(
     """
     aws = AWS()
     d = aws.add_deployment(region=Regions.us_east_1, account_id="123")
-    d.from_cloudformation_template(cfn_template)
+    d.from_cloudformation_template(path=cfn_template)

@@ -33,3 +33,8 @@ Resources:
       Principal: sns.amazonaws.com
       SourceArn:  !Ref SNSTopic 
       FunctionName: !Ref AwsServerlessExpressFunctionAlias
+    
+  SQSQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: myqueue
