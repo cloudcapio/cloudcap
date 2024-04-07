@@ -1,8 +1,11 @@
+from __future__ import annotations
 import logging
-import cfn_flip
+from typing import Any
+import cfn_flip  # type: ignore
 import networkx as nx
 import abc
-import cloudcap.utils as utils
+from cloudcap.cfn_template import CfnValue, exists_in_cfn_value
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -11,61 +14,38 @@ class UnknownArnError(Exception):
     pass
 
 
-class AWS:
-    def __init__(self):
-        self.arns = dict()
-        self.deployments = list()
-
-    def add_deployment(self, *, region, account_id):
-        d = Deployment(aws=self, region=region, account_id=account_id)
-        self.deployments.append(d)
-        return d
-
-    def by_arn(self, arn):
-        try:
-            self.arns[arn]
-        except KeyError as e:
-            raise UnknownArnError(e.message)
-
-    def new_lambda_function(self, *, region, account_id, function_name):
-        r = AWSLambdaFunction(
-            aws=self, region=region, account_id=account_id, function_name=function_name
-        )
-        self.register_resource(r)
-        return r
-
-    def new_sqs_queue(self, *, region, account_id, queue_name):
-        r = AWSSQSQueue(
-            aws=self, region=region, account_id=account_id, queue_name=queue_name
-        )
-        self.register_resource(r)
-        return r
-
-    def register_resource(self, r):
-        if r.arn in self.arns:
-            logger.warn(f"{r.arn} is already a registered resource")
-        self.arns[r.arn] = r
-        logger.info(f"registered resource {r.arn}")
+class UnknownResourceError(Exception):
+    pass
 
 
-class Deployment:
-    def __init__(self, *, aws, region, account_id):
-        logger.debug(f"new deployment ({region}, {account_id})")
-        self.aws = aws
-        self.region = region
-        self.account_id = account_id
+##### Account
 
-    def from_cloudformation_template(self, *, path: str):
-        CloudFormationStack.from_file(
-            aws=self.aws, region=self.region, account_id=self.account_id, path=path
-        )
+
+class Account:
+    def __init__(self, id: str):
+        self.id = id
 
 
 ##### Regions and Partitions
 
 
+class Partition:
+    def __init__(self, partition: str):
+        self.partition = partition
+
+    def __str__(self):
+        return self.partition
+
+    def __repr__(self):
+        return str(self)
+
+
+class Partitions:
+    aws = Partition("aws")
+
+
 class Region:
-    def __init__(self, partition, region):
+    def __init__(self, partition: Partition, region: str):
         self.partition = partition
         self.region = region
 
@@ -74,10 +54,6 @@ class Region:
 
     def __repr__(self):
         return str(self)
-
-
-class Partitions:
-    aws = "aws"
 
 
 class Regions:
@@ -89,13 +65,74 @@ class Regions:
 
 
 class Arn:
-    @staticmethod
-    def AWSLambdaFunctionArn(*, region, account_id, function_name):
-        return f"arn:{region.partition}:lambda:{region}:{account_id}:function:{function_name}"
+    def __init__(self, arn: str):
+        self.arn = arn
+
+    def __str__(self):
+        return self.arn
+
+    def __repr__(self):
+        return self.arn
 
     @staticmethod
-    def AWSSQSQueueArn(*, region, account_id, queue_name):
-        return f"arn:{region.partition}:sqs:{region}:{account_id}:{queue_name}"
+    def AWSLambdaFunctionArn(
+        region: Region, account: Account, function_name: str
+    ) -> Arn:
+        return Arn(
+            f"arn:{region.partition}:lambda:{region}:{account.id}:function:{function_name}"
+        )
+
+    @staticmethod
+    def AWSSQSQueueArn(region: Region, account: Account, queue_name: str) -> Arn:
+        return Arn(f"arn:{region.partition}:sqs:{region}:{account.id}:{queue_name}")
+
+
+class AWS:
+    def __init__(self):
+        self.arns: dict[Arn, Resource] = dict()
+        self.deployments: list[Deployment] = list()
+
+    def add_deployment(self, region: Region, account: Account) -> Deployment:
+        d = Deployment(self, region, account)
+        self.deployments.append(d)
+        return d
+
+    def by_arn(self, arn: Arn) -> Resource:
+        try:
+            return self.arns[arn]
+        except KeyError as e:
+            raise UnknownArnError(e)
+
+    def new_lambda_function(
+        self, region: Region, account: Account, function_name: str
+    ) -> Resource:
+        r = AWSLambdaFunction(self, region, account, function_name)
+        self.register_resource(r)
+        return r
+
+    def new_sqs_queue(
+        self, region: Region, account: Account, queue_name: str
+    ) -> Resource:
+        r = AWSSQSQueue(self, region, account, queue_name)
+        self.register_resource(r)
+        return r
+
+    def register_resource(self, r: Resource) -> None:
+        if r.arn in self.arns:
+            logger.warn(f"{r.arn} is already a registered resource")
+        self.arns[r.arn] = r
+        logger.info(f"registered resource {r.arn}")
+
+
+class Deployment:
+    def __init__(self, aws: AWS, region: Region, account: Account):
+        logger.debug(f"new deployment ({region}, {account.id})")
+        self.aws = aws
+        self.region = region
+        self.account = account
+
+    def from_cloudformation_template(self, path: str) -> None:
+        CloudFormationStack.from_file(self.aws, self.region, self.account, path)
 
 
 ##### Resources
@@ -140,49 +177,46 @@ class ResourceTypes:
 
 
 class Resource(abc.ABC):
-    def __init__(self, aws, region, account_id):
+    def __init__(self, aws: AWS, region: Region, account: Account):
         self.aws = aws
         self.region = region
-        self.account_id = account_id
+        self.account = account
 
-    @abc.abstractproperty
-    def arn(self):
-        pass
+    @property
+    @abc.abstractmethod
+    def arn(self) -> Arn:
+        raise NotImplementedError("Resource must implement arn() method")
 
 
 class AWSLambdaFunction(Resource):
-    def __init__(self, *, aws, region, account_id, function_name):
-        super().__init__(aws, region, account_id)
+    def __init__(self, aws: AWS, region: Region, account: Account, function_name: str):
+        super().__init__(aws, region, account)
         self.function_name = function_name
         logger.debug(f"new AWSLambdaFunction: {self.arn}")
 
     @property
-    def arn(self):
-        return Arn.AWSLambdaFunctionArn(
-            region=self.region,
-            account_id=self.account_id,
-            function_name=self.function_name,
-        )
+    def arn(self) -> Arn:
+        return Arn.AWSLambdaFunctionArn(self.region, self.account, self.function_name)
 
     @staticmethod
-    def from_cfn():
+    def from_cfn(
+        aws: AWS, region: Region, account: Account, cfn: Any
+    ) -> AWSLambdaFunction:
         raise NotImplementedError
 
 
 class AWSSQSQueue(Resource):
-    def __init__(self, *, aws, region, account_id, queue_name):
-        super().__init__(aws, region, account_id)
+    def __init__(self, aws: AWS, region: Region, account: Account, queue_name: str):
+        super().__init__(aws, region, account)
         self.queue_name = queue_name
         logger.debug(f"new AWSSQSQueue: {self.arn}")
 
     @property
-    def arn(self):
-        return Arn.AWSSQSQueueArn(
-            region=self.region, account_id=self.account_id, queue_name=self.queue_name
-        )
+    def arn(self) -> Arn:
+        return Arn.AWSSQSQueueArn(self.region, self.account, self.queue_name)
 
     @staticmethod
-    def from_cfn(*, aws, region, account_id, cfn):
+    def from_cfn(aws: AWS, region: Region, account: Account, cfn: Any) -> AWSSQSQueue:
         raise NotImplementedError
 
 
@@ -194,35 +228,43 @@ class CloudFormationTemplateError(Exception):
 class CloudFormationStack:
     """A CloudFormation Stack, usually instantiated from a CloudFormation template file."""
 
-    def __init__(self, *, aws, region, account_id, template, path=""):
+    def __init__(
+        self,
+        aws: AWS,
+        region: Region,
+        account: Account,
+        template: CfnValue,
+        path: str | os.PathLike[Any] = "",
+    ):
         self.aws = aws
         self.region = region
-        self.account_id = account_id
+        self.account = account
         self.template = template
         self.path = path
         self._init_dependency_graph()
         # instantiate the resources in order, and register them at aws
+        resources = self.template["Resources"]
         self.created_resources = [
-            self.create_resource(self.template["Resources"][r])
+            self.create_resource(resources[r])
             for r in self.logical_ids_by_dependency_order
         ]
 
-    def _init_dependency_graph(self):
+    def _init_dependency_graph(self) -> None:
         self.dependency_graph = nx.DiGraph()
         resources = self.template["Resources"]
         for r in resources:
-            self.dependency_graph.add_node(r)
+            self.dependency_graph.add_node(r)  # type: ignore
 
         for r1 in resources:
             for r2, r2_body in resources.items():
-                if utils.value_exists_in_nested_structure(r2_body, r1):
-                    self.dependency_graph.add_edge(r1, r2)
+                if exists_in_cfn_value(r2_body, r1):
+                    self.dependency_graph.add_edge(r1, r2)  # type: ignore
 
         try:
-            self.logical_ids_by_dependency_order = list(
-                nx.topological_sort(self.dependency_graph)
+            self.logical_ids_by_dependency_order: list[str] = list(
+                nx.topological_sort(self.dependency_graph)  # type: ignore
             )
-        except nx.NetworkXUnfeasible as e:
+        except nx.NetworkXUnfeasible:
             raise CloudFormationTemplateError(
                 f"CloudFormation template is cyclic: {self.path}"
             )
@@ -235,37 +277,43 @@ class CloudFormationStack:
             f"CloudFormation template ({self.path}) dependency order: {self.logical_ids_by_dependency_order}"
         )
 
-    def create_resource(self, body):
-        match body["Type"]:
+    def create_resource(self, body: CfnValue) -> Resource:
+        rtype = body["Type"]
+        assert isinstance(rtype, str)
+        match rtype:
             case ResourceTypes.AWS_Lambda_Function:
                 return self.aws.new_lambda_function(
-                    region=self.region,
-                    account_id=self.account_id,
-                    function_name=body["Properties"]["FunctionName"],
+                    self.region,
+                    self.account,
+                    body["Properties"]["FunctionName"],
                 )
             case ResourceTypes.AWS_Serverless_Function:
                 return self.aws.new_lambda_function(
-                    region=self.region,
-                    account_id=self.account_id,
-                    function_name=body["Properties"]["FunctionName"],
+                    self.region,
+                    self.account,
+                    body["Properties"]["FunctionName"],
                 )
             case ResourceTypes.AWS_SQS_Queue:
                 prop = body["Properties"]
                 return self.aws.new_sqs_queue(
-                    region=self.region,
-                    account_id=self.account_id,
-                    queue_name=prop["QueueName"],
+                    self.region,
+                    self.account,
+                    prop["QueueName"],
                 )
+            case _:
+                raise UnknownResourceError(f"{rtype}")
 
     @classmethod
-    def from_file(cls, *, aws, region, account_id, path: str):
+    def from_file(
+        cls, aws: AWS, region: Region, account: Account, path: str | os.PathLike[Any]
+    ):
         with open(path, "r") as f:
             try:
-                data = cfn_flip.load_yaml(f)
+                data = cfn_flip.load_yaml(f)  # type: ignore
                 logger.info(f"Loaded {path} as CloudFormation template in YAML format")
             except:
                 try:
-                    data = cfn_flip.load_json(f)
+                    data = cfn_flip.load_json(f)  # type: ignore
                     logger.info(
                         f"Loaded {path} as a CloudFormation template in JSON format"
                     )
@@ -274,6 +322,4 @@ class CloudFormationStack:
                         f"Unable to load {path} as a CloudFormation template"
                     )
 
-        return cls(
-            aws=aws, region=region, account_id=account_id, template=data, path=path
-        )
+        return cls(aws, region, account, data, path)

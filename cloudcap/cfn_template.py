@@ -1,4 +1,9 @@
-def value_exists_in_nested_structure(structure, value):
+from typing import Any
+
+CfnValue = Any
+
+
+def exists_in_cfn_value(value: CfnValue, target: str) -> bool:
     """
     Check if a value exists in an arbitrarily nested dictionary that can have lists nested inside as well.
 
@@ -9,20 +14,22 @@ def value_exists_in_nested_structure(structure, value):
     Returns:
     bool: True if the value exists, False otherwise.
     """
-    if isinstance(structure, dict):
+    if isinstance(value, dict):
         # Check if the value exists in the dictionary
-        if value in structure.values():
+        if target in value.values():
             return True
         # Recursively search in each value of the dictionary
-        for v in structure.values():
-            if value_exists_in_nested_structure(v, value):
+        v: Any
+        for v in value.values():
+            if exists_in_cfn_value(v, target):
                 return True
-    elif isinstance(structure, list):
+    elif isinstance(value, list):
         # Recursively search in each element of the list
-        for item in structure:
-            if item == value:
+        item: Any
+        for item in value:
+            if item == target:
                 return True
-            if value_exists_in_nested_structure(item, value):
+            if exists_in_cfn_value(item, target):
                 return True
     # If the value is not found in the current level, return False
     return False
