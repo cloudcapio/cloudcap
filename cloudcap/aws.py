@@ -6,6 +6,8 @@ import networkx as nx
 import abc
 from cloudcap.cfn_template import CfnValue, exists_in_cfn_value
 import os
+import yaml
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -22,8 +24,8 @@ class UnknownResourceError(Exception):
 
 
 class Account:
-    def __init__(self, id: str):
-        self.id = id
+    def __init__(self, account_id: str):
+        self.accoun_id = account_id
 
 
 ##### Regions and Partitions
@@ -79,12 +81,14 @@ class Arn:
         region: Region, account: Account, function_name: str
     ) -> Arn:
         return Arn(
-            f"arn:{region.partition}:lambda:{region}:{account.id}:function:{function_name}"
+            f"arn:{region.partition}:lambda:{region}:{account.accoun_id}:function:{function_name}"
         )
 
     @staticmethod
     def AWSSQSQueueArn(region: Region, account: Account, queue_name: str) -> Arn:
-        return Arn(f"arn:{region.partition}:sqs:{region}:{account.id}:{queue_name}")
+        return Arn(
+            f"arn:{region.partition}:sqs:{region}:{account.accoun_id}:{queue_name}"
+        )
 
 
 class AWS:
@@ -101,7 +105,7 @@ class AWS:
         try:
             return self.arns[arn]
         except KeyError as e:
-            raise UnknownArnError(e)
+            raise UnknownArnError from e
 
     def new_lambda_function(
         self, region: Region, account: Account, function_name: str
@@ -119,14 +123,14 @@ class AWS:
 
     def register_resource(self, r: Resource) -> None:
         if r.arn in self.arns:
-            logger.warn(f"{r.arn} is already a registered resource")
+            logger.warning("%s is already a registered resource", r.arn)
         self.arns[r.arn] = r
-        logger.info(f"registered resource {r.arn}")
+        logger.info("registered resource %s", r.arn)
 
 
 class Deployment:
     def __init__(self, aws: AWS, region: Region, account: Account):
-        logger.debug(f"new deployment ({region}, {account.id})")
+        logger.debug("new deployment (%s, %s)", region, account.accoun_id)
         self.aws = aws
         self.region = region
         self.account = account
@@ -192,7 +196,7 @@ class AWSLambdaFunction(Resource):
     def __init__(self, aws: AWS, region: Region, account: Account, function_name: str):
         super().__init__(aws, region, account)
         self.function_name = function_name
-        logger.debug(f"new AWSLambdaFunction: {self.arn}")
+        logger.debug("new AWSLambdaFunction: %s", self.arn)
 
     @property
     def arn(self) -> Arn:
@@ -209,7 +213,7 @@ class AWSSQSQueue(Resource):
     def __init__(self, aws: AWS, region: Region, account: Account, queue_name: str):
         super().__init__(aws, region, account)
         self.queue_name = queue_name
-        logger.debug(f"new AWSSQSQueue: {self.arn}")
+        logger.debug("new AWSSQSQueue: %s", self.arn)
 
     @property
     def arn(self) -> Arn:
@@ -264,17 +268,21 @@ class CloudFormationStack:
             self.logical_ids_by_dependency_order: list[str] = list(
                 nx.topological_sort(self.dependency_graph)  # type: ignore
             )
-        except nx.NetworkXUnfeasible:
+        except nx.NetworkXUnfeasible as e:
             raise CloudFormationTemplateError(
                 f"CloudFormation template is cyclic: {self.path}"
-            )
+            ) from e
 
         logger.debug(
-            f"CloudFormation template ({self.path}) dependency graph: {self.dependency_graph.edges}"
+            "CloudFormation template (%s) dependency graph: %s",
+            self.path,
+            self.dependency_graph.edges,
         )
 
         logger.debug(
-            f"CloudFormation template ({self.path}) dependency order: {self.logical_ids_by_dependency_order}"
+            "CloudFormation template (%s) dependency order: %s",
+            self.path,
+            self.logical_ids_by_dependency_order,
         )
 
     def create_resource(self, body: CfnValue) -> Resource:
@@ -307,17 +315,18 @@ class CloudFormationStack:
     def from_file(
         cls, aws: AWS, region: Region, account: Account, path: str | os.PathLike[Any]
     ):
-        with open(path, "r") as f:
+        with open(path, "r", encoding="utf-8") as f:
             try:
                 data = cfn_flip.load_yaml(f)  # type: ignore
-                logger.info(f"Loaded {path} as CloudFormation template in YAML format")
-            except:
+                logger.info("Loaded %s as CloudFormation template in YAML format", path)
+            except yaml.YAMLError:
                 try:
                     data = cfn_flip.load_json(f)  # type: ignore
                     logger.info(
-                        f"Loaded {path} as a CloudFormation template in JSON format"
+                        "Loaded %s as a CloudFormation template in JSON format", path
                     )
-                except:
+                except json.JSONDecodeError:
+                    # pylint: disable=raise-missing-from
                     raise CloudFormationTemplateError(
                         f"Unable to load {path} as a CloudFormation template"
                     )
