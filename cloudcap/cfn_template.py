@@ -5,14 +5,14 @@ CfnValue = Any
 
 def exists_in_cfn_value(value: CfnValue, target: str) -> bool:
     """
-    Check if a value exists in an arbitrarily nested dictionary that can have lists nested inside as well.
+    Checks if a target value exists within a CloudFormation template value.
 
     Args:
-    structure (dict or list): The nested dictionary or list to search in.
-    value: The value to search for.
+    - value (CfnValue): The CloudFormation template value to search within.
+    - target (str): The target value to search for.
 
     Returns:
-    bool: True if the value exists, False otherwise.
+    - bool: True if the target value exists within the CloudFormation template value, False otherwise.
     """
     if isinstance(value, dict):
         # Check if the value exists in the dictionary

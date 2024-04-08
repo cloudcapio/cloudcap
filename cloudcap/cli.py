@@ -3,7 +3,7 @@ from typing_extensions import Annotated
 import logging
 import typer
 from cloudcap import __app_name__, __version__
-from cloudcap.aws import AWS, Regions
+from cloudcap.aws import AWS, Regions, Account
 
 app = typer.Typer()
 
@@ -52,5 +52,7 @@ def check(
     Check whether the usage estimates satisfy the constraints of the infrastructure.
     """
     aws = AWS()
-    d = aws.add_deployment(region=Regions.us_east_1, account_id="123")
+    d = aws.add_deployment(Regions.us_east_1, Account("123"))
     d.from_cloudformation_template(path=cfn_template)
+    print(aws.arns)
+    print(aws.deployments)

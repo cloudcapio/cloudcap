@@ -1,6 +1,7 @@
 from __future__ import annotations
+from collections import defaultdict
 import logging
-from typing import Any
+from typing import Any, cast
 import cfn_flip  # type: ignore
 import networkx as nx
 import abc
@@ -8,6 +9,7 @@ from cloudcap.cfn_template import CfnValue, exists_in_cfn_value
 import os
 import yaml
 import json
+from cloudcap import utils
 
 logger = logging.getLogger(__name__)
 
@@ -20,12 +22,16 @@ class UnknownResourceError(Exception):
     pass
 
 
+class InvalidCloudFormationTemplate(Exception):
+    pass
+
+
 ##### Account
 
 
 class Account:
     def __init__(self, account_id: str):
-        self.accoun_id = account_id
+        self.account_id = account_id
 
 
 ##### Regions and Partitions
@@ -65,33 +71,25 @@ class Regions:
 
 ##### Arn
 
+Arn = str
 
-class Arn:
-    def __init__(self, arn: str):
-        self.arn = arn
 
-    def __str__(self):
-        return self.arn
-
-    def __repr__(self):
-        return self.arn
-
+class ArnBuilder:
     @staticmethod
     def AWSLambdaFunctionArn(
         region: Region, account: Account, function_name: str
     ) -> Arn:
-        return Arn(
-            f"arn:{region.partition}:lambda:{region}:{account.accoun_id}:function:{function_name}"
-        )
+        return f"arn:{region.partition}:lambda:{region}:{account.account_id}:function:{function_name}"
 
     @staticmethod
     def AWSSQSQueueArn(region: Region, account: Account, queue_name: str) -> Arn:
-        return Arn(
-            f"arn:{region.partition}:sqs:{region}:{account.accoun_id}:{queue_name}"
-        )
+        return f"arn:{region.partition}:sqs:{region}:{account.account_id}:{queue_name}"
 
 
 class AWS:
+    arns: dict[Arn, Resource]
+    deployments: list[Deployment]
+
     def __init__(self):
         self.arns: dict[Arn, Resource] = dict()
         self.deployments: list[Deployment] = list()
@@ -109,15 +107,18 @@ class AWS:
 
     def new_lambda_function(
         self, region: Region, account: Account, function_name: str
-    ) -> Resource:
+    ) -> AWSLambdaFunction:
         r = AWSLambdaFunction(self, region, account, function_name)
         self.register_resource(r)
         return r
 
     def new_sqs_queue(
         self, region: Region, account: Account, queue_name: str
-    ) -> Resource:
-        r = AWSSQSQueue(self, region, account, queue_name)
+    ) -> AWSSQSQueue:
+        queue_url = (
+            f"https://sqs.{region}.amazonaws.com/{account.account_id}/{queue_name}"
+        )
+        r = AWSSQSQueue(self, region, account, queue_name, queue_url)
         self.register_resource(r)
         return r
 
@@ -130,7 +131,7 @@ class AWS:
 
 class Deployment:
     def __init__(self, aws: AWS, region: Region, account: Account):
-        logger.debug("new deployment (%s, %s)", region, account.accoun_id)
+        logger.debug("new deployment (%s, %s)", region, account.account_id)
         self.aws = aws
         self.region = region
         self.account = account
@@ -182,6 +183,7 @@ class ResourceTypes:
 
 class Resource(abc.ABC):
     def __init__(self, aws: AWS, region: Region, account: Account):
+        super().__init__()
         self.aws = aws
         self.region = region
         self.account = account
@@ -189,7 +191,29 @@ class Resource(abc.ABC):
     @property
     @abc.abstractmethod
     def arn(self) -> Arn:
-        raise NotImplementedError("Resource must implement arn() method")
+        raise NotImplementedError
+
+
+class LambdaEventSource(abc.ABC):
+    event_source_mappings: list[LambdaEventSourceMapping]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.event_source_mappings = []
+
+    def add_event_source_mapping(
+        self, event_source_mapping: LambdaEventSourceMapping
+    ) -> None:
+        self.event_source_mappings.append(event_source_mapping)
+
+
+class LambdaEventSourceMapping:
+    function_name: str
+    event_source_arn: Arn
+
+    def __init__(self, function_name: str, event_source_arn: Arn) -> None:
+        self.function_name = function_name
+        self.event_source_arn = event_source_arn
 
 
 class AWSLambdaFunction(Resource):
@@ -200,7 +224,9 @@ class AWSLambdaFunction(Resource):
 
     @property
     def arn(self) -> Arn:
-        return Arn.AWSLambdaFunctionArn(self.region, self.account, self.function_name)
+        return ArnBuilder.AWSLambdaFunctionArn(
+            self.region, self.account, self.function_name
+        )
 
     @staticmethod
     def from_cfn(
@@ -209,15 +235,31 @@ class AWSLambdaFunction(Resource):
         raise NotImplementedError
 
 
-class AWSSQSQueue(Resource):
-    def __init__(self, aws: AWS, region: Region, account: Account, queue_name: str):
+class AWSSQSQueue(Resource, LambdaEventSource):
+    aws: AWS
+    aws: AWS
+    region: Region
+    account: Account
+    queue_name: str
+    queue_url: str
+
+    def __init__(
+        self,
+        aws: AWS,
+        region: Region,
+        account: Account,
+        queue_name: str,
+        queue_url: str,
+    ):
         super().__init__(aws, region, account)
         self.queue_name = queue_name
+        self.queue_url = queue_url
+        self._lambda_triggers = []
         logger.debug("new AWSSQSQueue: %s", self.arn)
 
     @property
     def arn(self) -> Arn:
-        return Arn.AWSSQSQueueArn(self.region, self.account, self.queue_name)
+        return ArnBuilder.AWSSQSQueueArn(self.region, self.account, self.queue_name)
 
     @staticmethod
     def from_cfn(aws: AWS, region: Region, account: Account, cfn: Any) -> AWSSQSQueue:
@@ -232,6 +274,17 @@ class CloudFormationTemplateError(Exception):
 class CloudFormationStack:
     """A CloudFormation Stack, usually instantiated from a CloudFormation template file."""
 
+    aws: AWS
+    region: Region
+    account: Account
+    template: CfnValue
+    path: str | os.PathLike[Any]
+    dependency_graph: nx.DiGraph
+    resources: list[CfnValue]
+    logical_ids_by_dependency_order: list[str]
+    refs: dict[str, str]
+    atts: defaultdict[str, dict[str, str]]
+
     def __init__(
         self,
         aws: AWS,
@@ -245,13 +298,13 @@ class CloudFormationStack:
         self.account = account
         self.template = template
         self.path = path
+        self.refs = {}
+        self.atts = defaultdict(lambda: {})
         self._init_dependency_graph()
         # instantiate the resources in order, and register them at aws
         resources = self.template["Resources"]
-        self.created_resources = [
-            self.create_resource(resources[r])
-            for r in self.logical_ids_by_dependency_order
-        ]
+        for logical_id in self.logical_ids_by_dependency_order:
+            self.create_resource(logical_id, resources[logical_id])
 
     def _init_dependency_graph(self) -> None:
         self.dependency_graph = nx.DiGraph()
@@ -285,36 +338,102 @@ class CloudFormationStack:
             self.logical_ids_by_dependency_order,
         )
 
-    def create_resource(self, body: CfnValue) -> Resource:
+    def create_resource(self, logical_id: str, body: CfnValue) -> None:
+        body = self.resolve_intrinsic_functions(body)
         rtype = body["Type"]
         assert isinstance(rtype, str)
         match rtype:
             case ResourceTypes.AWS_Lambda_Function:
-                return self.aws.new_lambda_function(
+                prop = body["Properties"]
+                function_name: str = ""
+                if "QueueName" in prop:
+                    function_name = prop["FunctionName"]
+                else:
+                    function_name = utils.random_id()
+                r = self.aws.new_lambda_function(
                     self.region,
                     self.account,
-                    body["Properties"]["FunctionName"],
+                    function_name,
                 )
-            case ResourceTypes.AWS_Serverless_Function:
-                return self.aws.new_lambda_function(
-                    self.region,
-                    self.account,
-                    body["Properties"]["FunctionName"],
-                )
+                self.refs[logical_id] = str(r.arn)
+                self.atts[logical_id]["Arn"] = r.function_name
+                # INFO:
+                # hidden atts:
+                #   - SnapStartResponse.ApplyOn
+                #   - SnapStartResponse.OptimizationStatus
             case ResourceTypes.AWS_SQS_Queue:
                 prop = body["Properties"]
-                return self.aws.new_sqs_queue(
+                queue_name: str = ""
+                if "QueueName" in prop:
+                    queue_name = prop["QueueName"]
+                else:
+                    queue_name = utils.random_id()
+                r = self.aws.new_sqs_queue(
                     self.region,
                     self.account,
-                    prop["QueueName"],
+                    queue_name,
                 )
+                self.refs[logical_id] = r.queue_url
+                self.atts[logical_id]["Arn"] = str(r.arn)
+                self.atts[logical_id]["QueueName"] = r.queue_name
+                self.atts[logical_id]["QueueUrl"] = r.queue_url
+            case ResourceTypes.AWS_Lambda_EventSourceMapping:
+                prop = body["Properties"]
+                function_name = prop["FunctionName"]
+                event_source_arn = prop["EventSourceArn"]
+                mapping = LambdaEventSourceMapping(
+                    function_name=function_name, event_source_arn=event_source_arn
+                )
+                cast(
+                    LambdaEventSource, self.aws.by_arn(event_source_arn)
+                ).add_event_source_mapping(mapping)
             case _:
                 raise UnknownResourceError(f"{rtype}")
+
+    def resolve_intrinsic_functions(self, body: CfnValue) -> CfnValue:
+        """
+        Maps intrinsic functions within a CloudFormation template body.
+
+        Args:
+        - body (CfnValue): The CloudFormation template body containing intrinsic functions.
+
+        Returns:
+        - CfnValue: The CloudFormation template body with resolved intrinsic functions.
+        """
+
+        # define a function that recursely searches for the intrinsic functions
+        # and replaces them
+        def rec(_body: CfnValue) -> CfnValue:
+            if isinstance(_body, dict):
+                # Recursively search in each value of the dictionary
+                _body = cast(dict[str, CfnValue], _body)
+                for k, v in _body.items():
+                    if k == "Ref":
+                        # v is the logical id
+                        return self.refs[v]
+                    elif k == "Fn::GetAtt":
+                        try:
+                            logical_id = v[0]
+                            attribute_name = v[1]
+                        except Exception as e:
+                            raise InvalidCloudFormationTemplate from e
+                        return self.atts[logical_id][attribute_name]
+                for k, v in _body.items():
+                    _body[k] = rec(v)
+                return _body
+            elif isinstance(_body, list):
+                # Recursively search in each element of the list
+                return [rec(v) for v in cast(list[CfnValue], _body)]
+            # can immediately if it is just a str
+            return _body
+
+        body = rec(body)
+        return body
 
     @classmethod
     def from_file(
         cls, aws: AWS, region: Region, account: Account, path: str | os.PathLike[Any]
-    ):
+    ) -> CloudFormationStack:
         with open(path, "r", encoding="utf-8") as f:
             try:
                 data = cfn_flip.load_yaml(f)  # type: ignore
