@@ -7,7 +7,7 @@ __version__ = "0.1.0"
 
 (
     SUCCESS,
+    SOLVER_REJECT,
     SOLVER_ERROR,
-) = range(2)
-
-ERRORS = {SOLVER_ERROR: "solver error"}
+    INVALID_INPUT,
+) = range(4)

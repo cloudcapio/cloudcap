@@ -2,6 +2,7 @@ Resources:
   LambdaFunction:
     Type: AWS::Lambda::Function
     Properties:
+      FunctionName: lambda1
       Code:
         S3Bucket: my-source-bucket
         S3Key: lambda/my-nodejs-app.zip
@@ -9,6 +10,8 @@ Resources:
       Runtime: nodejs8.10
       Timeout: 60
       MemorySize: 512
+      Environment:
+        TestQueue: !GetAtt MyQueue.Arn
 
   LambdaFunctionEventSourceMapping:
     Type: AWS::Lambda::EventSourceMapping
@@ -21,5 +24,6 @@ Resources:
   MyQueue:
     Type: AWS::SQS::Queue
     Properties:
+      QueueName: queue1
       DelaySeconds: 0
       VisibilityTimeout: 120

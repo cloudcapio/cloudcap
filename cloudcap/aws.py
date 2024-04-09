@@ -1,15 +1,16 @@
 from __future__ import annotations
 from collections import defaultdict
 import logging
+import sys
 from typing import Any, Optional, cast
 import cfn_flip  # type: ignore
 import networkx as nx
 import abc
+from cloudcap import INVALID_INPUT
 from cloudcap.cfn_template import CfnValue, exists_in_cfn_value
 import os
 import yaml
 import json
-from cloudcap import utils
 
 logger = logging.getLogger(__name__)
 
@@ -120,24 +121,6 @@ class AWS:
             except KeyError:
                 raise KeyError(f"AWS.__getitem__ received unknown key: {key}")
 
-    def new_lambda_function(
-        self, region: Region, account: Account, function_name: str
-    ) -> AWSLambdaFunction:
-        r = AWSLambdaFunction(self, region, account, function_name)
-        self.register_resource(r)
-        return r
-
-    def new_sqs_queue(
-        self, region: Region, account: Account, queue_name: str
-    ) -> AWSSQSQueue:
-        queue_url: Url = (
-            f"https://sqs.{region}.amazonaws.com/{account.account_id}/{queue_name}"
-        )
-        r = AWSSQSQueue(self, region, account, queue_name, queue_url)
-        self.register_resource(r)
-        self.register_url(queue_url, r)
-        return r
-
     def register_resource(self, r: Resource) -> None:
         if r.arn in self.arns:
             logger.warning("%s is already a registered resource", r.arn)
@@ -204,11 +187,19 @@ class ResourceTypes:
 
 
 class Resource(abc.ABC):
-    def __init__(self, aws: AWS, region: Region, account: Account):
+    def __init__(
+        self,
+        aws: AWS,
+        region: Region,
+        account: Account,
+        logical_id: Optional[str] = None,
+    ):
         super().__init__()
         self.aws = aws
         self.region = region
         self.account = account
+        self.aws.register_resource(self)
+        self.logical_id = logical_id
 
     @property
     @abc.abstractmethod
@@ -250,11 +241,40 @@ class LambdaEventSourceMapping:
         self.function_name = function_name
         self.event_source_arn = event_source_arn
 
+    @staticmethod
+    def from_cloudformation_stack(
+        stack: CloudFormationStack, logical_id: str, body: CfnValue
+    ) -> LambdaEventSourceMapping:
+        prop = body["Properties"]
+        function_name = prop["FunctionName"]
+        event_source_arn = prop["EventSourceArn"]
+        assert isinstance(event_source_arn, str)
+        mapping = LambdaEventSourceMapping(
+            function_name=function_name, event_source_arn=event_source_arn
+        )
+        cast(LambdaEventSource, stack.aws[event_source_arn]).add_event_source_mapping(
+            mapping
+        )
+        return mapping
+
 
 class AWSLambdaFunction(Resource):
-    def __init__(self, aws: AWS, region: Region, account: Account, function_name: str):
-        super().__init__(aws, region, account)
+    function_name: str
+    # A function's environment variable settings
+    environment: dict[str, str]
+
+    def __init__(
+        self,
+        aws: AWS,
+        region: Region,
+        account: Account,
+        function_name: str,
+        environment: Optional[dict[str, str]] = None,
+        logical_id: Optional[str] = None,
+    ):
         self.function_name = function_name
+        self.environment = environment if environment else {}
+        super().__init__(aws, region, account, logical_id=logical_id)
         logger.debug("new AWSLambdaFunction: %s", self.arn)
 
     @property
@@ -264,10 +284,37 @@ class AWSLambdaFunction(Resource):
         )
 
     @staticmethod
-    def from_cfn(
-        aws: AWS, region: Region, account: Account, cfn: Any
+    def from_cloudformation_stack(
+        stack: CloudFormationStack, logical_id: str, body: CfnValue
     ) -> AWSLambdaFunction:
-        raise NotImplementedError
+        prop = body["Properties"]
+
+        if "FunctionName" not in prop:
+            logger.error(
+                "To use cloudcap, FunctionName is a required parameter for AWS::Lambda::Function resource type."
+            )
+            sys.exit(INVALID_INPUT)
+
+        function_name: str = prop["FunctionName"]
+        environment: Optional[dict[str, str]] = (
+            prop["Environment"] if "Environment" in prop else None
+        )
+
+        r = AWSLambdaFunction(
+            stack.aws,
+            stack.region,
+            stack.account,
+            function_name,
+            environment=environment,
+            logical_id=logical_id,
+        )
+        stack.refs[logical_id] = str(r.arn)
+        stack.atts[logical_id]["Arn"] = r.function_name
+        # INFO:
+        # hidden atts:
+        #   - SnapStartResponse.ApplyOn
+        #   - SnapStartResponse.OptimizationStatus
+        return r
 
 
 class AWSSQSQueue(Resource, LambdaEventSource):
@@ -275,7 +322,7 @@ class AWSSQSQueue(Resource, LambdaEventSource):
     region: Region
     account: Account
     queue_name: str
-    queue_url: str
+    queue_url: Url
 
     def __init__(
         self,
@@ -283,20 +330,40 @@ class AWSSQSQueue(Resource, LambdaEventSource):
         region: Region,
         account: Account,
         queue_name: str,
-        queue_url: str,
+        logical_id: Optional[str] = None,
     ):
-        super().__init__(aws, region, account)
         self.queue_name = queue_name
-        self.queue_url = queue_url
-        logger.debug("new AWSSQSQueue: %s", self.arn)
+        self.queue_url = (
+            f"https://sqs.{region}.amazonaws.com/{account.account_id}/{queue_name}"
+        )
+        super().__init__(aws, region, account, logical_id=logical_id)
+        self.aws.register_url(self.queue_url, self)
+        logger.debug("new AWSSQSQueue: %s. URL: %s", self.arn, self.queue_url)
 
     @property
     def arn(self) -> Arn:
         return ArnBuilder.AWSSQSQueueArn(self.region, self.account, self.queue_name)
 
     @staticmethod
-    def from_cfn(aws: AWS, region: Region, account: Account, cfn: Any) -> AWSSQSQueue:
-        raise NotImplementedError
+    def from_cloudformation_stack(
+        stack: CloudFormationStack, logical_id: str, body: CfnValue
+    ) -> AWSSQSQueue:
+        prop = body["Properties"]
+        if "QueueName" not in prop:
+            logger.error(
+                "To use cloudcap, QueueName is a required parameter for AWS::SQS::Queue resource type."
+            )
+            sys.exit(INVALID_INPUT)
+
+        queue_name: str = prop["QueueName"]
+        r = AWSSQSQueue(
+            stack.aws, stack.region, stack.account, queue_name, logical_id=logical_id
+        )
+        stack.refs[logical_id] = r.queue_url
+        stack.atts[logical_id]["Arn"] = str(r.arn)
+        stack.atts[logical_id]["QueueName"] = r.queue_name
+        stack.atts[logical_id]["QueueUrl"] = r.queue_url
+        return r
 
 
 ##### CloudFormation
@@ -377,50 +444,13 @@ class CloudFormationStack:
         assert isinstance(rtype, str)
         match rtype:
             case ResourceTypes.AWS_Lambda_Function:
-                prop = body["Properties"]
-                function_name: str = ""
-                if "QueueName" in prop:
-                    function_name = prop["FunctionName"]
-                else:
-                    function_name = utils.random_id()
-                r = self.aws.new_lambda_function(
-                    self.region,
-                    self.account,
-                    function_name,
-                )
-                self.refs[logical_id] = str(r.arn)
-                self.atts[logical_id]["Arn"] = r.function_name
-                # INFO:
-                # hidden atts:
-                #   - SnapStartResponse.ApplyOn
-                #   - SnapStartResponse.OptimizationStatus
+                AWSLambdaFunction.from_cloudformation_stack(self, logical_id, body)
             case ResourceTypes.AWS_SQS_Queue:
-                prop = body["Properties"]
-                queue_name: str = ""
-                if "QueueName" in prop:
-                    queue_name = prop["QueueName"]
-                else:
-                    queue_name = utils.random_id()
-                r = self.aws.new_sqs_queue(
-                    self.region,
-                    self.account,
-                    queue_name,
-                )
-                self.refs[logical_id] = r.queue_url
-                self.atts[logical_id]["Arn"] = str(r.arn)
-                self.atts[logical_id]["QueueName"] = r.queue_name
-                self.atts[logical_id]["QueueUrl"] = r.queue_url
+                AWSSQSQueue.from_cloudformation_stack(self, logical_id, body)
             case ResourceTypes.AWS_Lambda_EventSourceMapping:
-                prop = body["Properties"]
-                function_name = prop["FunctionName"]
-                event_source_arn = prop["EventSourceArn"]
-                assert isinstance(event_source_arn, str)
-                mapping = LambdaEventSourceMapping(
-                    function_name=function_name, event_source_arn=event_source_arn
+                LambdaEventSourceMapping.from_cloudformation_stack(
+                    self, logical_id, body
                 )
-                cast(
-                    LambdaEventSource, self.aws[event_source_arn]
-                ).add_event_source_mapping(mapping)
             case _:
                 raise UnknownResourceError(f"{rtype}")
 

@@ -1,13 +1,18 @@
 from __future__ import annotations
 from collections import defaultdict
 import enum
-from typing import Any
+import logging
+from typing import Any, TYPE_CHECKING
 from cloudcap.plugins import Plugin, builtin_plugins
 from cloudcap.metrics import NREQUESTS, Metric
-from cloudcap import utils
 
 from z3 import *  # type: ignore
-from cloudcap.aws import AWS, Arn, Resource
+from cloudcap.aws import AWS, Resource
+
+if TYPE_CHECKING:
+    from cloudcap.estimates import Estimates
+
+logger = logging.getLogger(__name__)
 
 Constraint = Any
 Variable = Any
@@ -127,3 +132,11 @@ class Analyzer:
 
     def sexpr(self) -> Any:
         return self.solver.sexpr()
+
+    def add_estimates(self, estimates: Estimates):
+        for arn, metrics in estimates.items():
+            if arn not in self.aws.arns:
+                logger.error(f"{arn} does not exist in the infrastructure")
+            resource = self.aws[arn]
+            for metric, estimate in metrics.items():
+                self.add(self[resource, metric] == estimate)
