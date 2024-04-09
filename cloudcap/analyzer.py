@@ -136,7 +136,7 @@ class Analyzer:
     def add_estimates(self, estimates: Estimates):
         for arn, metrics in estimates.items():
             if arn not in self.aws.arns:
-                logger.error(f"{arn} does not exist in the infrastructure")
+                logger.error("%s does not exist in the infrastructure", arn)
             resource = self.aws[arn]
             for metric, estimate in metrics.items():
                 self.add(self[resource, metric] == estimate)
