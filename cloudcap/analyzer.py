@@ -1,7 +1,10 @@
+from __future__ import annotations
+from collections import defaultdict
 import enum
 from typing import Any
 from cloudcap.plugins import Plugin, builtin_plugins
-from cloudcap.metrics import Metric
+from cloudcap.metrics import NREQUESTS, Metric
+from cloudcap import utils
 
 from z3 import *  # type: ignore
 from cloudcap.aws import AWS, Arn, Resource
@@ -16,6 +19,18 @@ class AnalyzerResult(enum.Enum):
     PASS = 1
     REJECT = 2
     UNKNOWN = 3
+
+    @staticmethod
+    def from_z3_check_result(z3result: Any) -> AnalyzerResult:
+        match z3result:
+            case z3.sat:
+                return AnalyzerResult.PASS
+            case z3.unsat:
+                return AnalyzerResult.REJECT
+            case z3.unknown:
+                return AnalyzerResult.UNKNOWN
+            case _:
+                return AnalyzerResult.UNKNOWN
 
 
 class Analyzer:
@@ -36,12 +51,40 @@ class Analyzer:
     def add_plugin(self, plugin: type[Plugin]) -> None:
         self.plugins.append(plugin(self))
 
-    def constrain(self):
+    def constrain(self) -> None:
+        # call all plugins
         for plugin in self.plugins:
-            plugin.constrain(self.aws)
+            plugin.constrain()
+
+        # generate incoming constraints
+        incomings_map: defaultdict[tuple[Resource, Metric], list[Variable]] = (
+            defaultdict(list)
+        )
+        for (_, resource2, metric), var in self.edge_variables.items():
+            incomings_map[(resource2, metric)].append(var)
+
+        for (resource, metric), incomings in incomings_map.items():
+            self.add(self[resource, metric] == sum(incomings[1:], incomings[0]))
+
+        # generate basic constraints
+        # TODO: only doing NREQUESTS >= 0 for now
+        self.add(
+            *[
+                var >= 0
+                for (_, metric), var in self.node_variables.items()
+                if metric == NREQUESTS
+            ]
+        )
+        self.add(
+            *[
+                var >= 0
+                for (_, _, metric), var in self.edge_variables.items()
+                if metric == NREQUESTS
+            ]
+        )
 
     def solve(self) -> AnalyzerResult:
-        return self.solver.solve()
+        return AnalyzerResult.from_z3_check_result(self.solver.check())
 
     def __getitem__(self, key: NodeVariableIndex | EdgeVariableIndex) -> Variable:
         if not isinstance(key, tuple) and (len(key) == 2 or len(key == 3)):  # type: ignore
@@ -54,8 +97,9 @@ class Analyzer:
             resource = key[0]
             metric = key[1]
             assert isinstance(resource, Resource) and isinstance(metric, Metric)
-            if not (resource, metric) in self.node_variables:
-                v = Int(format_arn_for_z3(resource.arn))  # type: ignore
+            if (resource, metric) not in self.node_variables:
+                v_name = f"{resource.arn}.{metric}"
+                v = Int(v_name)  # type: ignore
                 self.node_variables[(resource, metric)] = v
             return self.node_variables[(resource, metric)]
         elif len(key) == 3:
@@ -68,8 +112,9 @@ class Analyzer:
                 and isinstance(resource2, Resource)
                 and isinstance(metric, Metric)
             )
-            if not (resource1, resource2, metric) in self.edge_variables:
-                v = Int(format_arn_for_z3(resource.arn))  # type: ignore
+            if (resource1, resource2, metric) not in self.edge_variables:
+                v_name = f"{resource1.arn}.{resource2.arn}.{metric}"
+                v = Int(v_name)  # type: ignore
                 self.edge_variables[(resource1, resource2, metric)] = v
             return self.edge_variables[(resource1, resource2, metric)]
         else:
@@ -82,7 +127,3 @@ class Analyzer:
 
     def sexpr(self) -> Any:
         return self.solver.sexpr()
-
-
-def format_arn_for_z3(arn: Arn) -> str:
-    return arn.replace(":", "_")

@@ -1,7 +1,7 @@
 from __future__ import annotations
 from collections import defaultdict
 import logging
-from typing import Any, cast
+from typing import Any, Optional, cast
 import cfn_flip  # type: ignore
 import networkx as nx
 import abc
@@ -215,6 +215,19 @@ class Resource(abc.ABC):
     def arn(self) -> Arn:
         raise NotImplementedError
 
+    def find_lambda_by_name(self, lambda_name: str) -> Optional[AWSLambdaFunction]:
+        """
+        Finding Lambda by name is a common thing.
+        This will find the ARN of the Lambda with this name within the same region and account.
+        """
+        lambda_arn = ArnBuilder.AWSLambdaFunctionArn(
+            self.region, self.account, lambda_name
+        )
+        if lambda_arn in self.aws.arns:
+            return cast(AWSLambdaFunction, self.aws[lambda_arn])
+        else:
+            return None
+
 
 class LambdaEventSource(abc.ABC):
     event_source_mappings: list[LambdaEventSourceMapping]
@@ -275,7 +288,6 @@ class AWSSQSQueue(Resource, LambdaEventSource):
         super().__init__(aws, region, account)
         self.queue_name = queue_name
         self.queue_url = queue_url
-        self._lambda_triggers = []
         logger.debug("new AWSSQSQueue: %s", self.arn)
 
     @property
