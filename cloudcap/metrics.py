@@ -1,0 +1,3 @@
+Metric = str
+
+NREQUESTS = "nrequests"

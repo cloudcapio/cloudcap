@@ -72,6 +72,7 @@ class Regions:
 ##### Arn
 
 Arn = str
+Url = str
 
 
 class ArnBuilder:
@@ -88,22 +89,36 @@ class ArnBuilder:
 
 class AWS:
     arns: dict[Arn, Resource]
+    urls: dict[Url, Resource]
     deployments: list[Deployment]
 
     def __init__(self):
-        self.arns: dict[Arn, Resource] = dict()
+        self.arns = dict()
+        self.urls = dict()
         self.deployments: list[Deployment] = list()
+
+    @property
+    def resources(self) -> list[Resource]:
+        return list(self.arns.values())
 
     def add_deployment(self, region: Region, account: Account) -> Deployment:
         d = Deployment(self, region, account)
         self.deployments.append(d)
         return d
 
-    def by_arn(self, arn: Arn) -> Resource:
+    def __getitem__(self, key: Arn | Url) -> Resource:
+        if not (isinstance(key, Arn) or isinstance(key, Url)):  # type: ignore
+            raise KeyError(
+                f"AWS.__getitem__ expected an Arn or Url, but got a {type(key)}. Got: {key}"
+            )
+
         try:
-            return self.arns[arn]
-        except KeyError as e:
-            raise UnknownArnError from e
+            return self.arns[key]
+        except KeyError:
+            try:
+                return self.urls[key]
+            except KeyError:
+                raise KeyError(f"AWS.__getitem__ received unknown key: {key}")
 
     def new_lambda_function(
         self, region: Region, account: Account, function_name: str
@@ -115,11 +130,12 @@ class AWS:
     def new_sqs_queue(
         self, region: Region, account: Account, queue_name: str
     ) -> AWSSQSQueue:
-        queue_url = (
+        queue_url: Url = (
             f"https://sqs.{region}.amazonaws.com/{account.account_id}/{queue_name}"
         )
         r = AWSSQSQueue(self, region, account, queue_name, queue_url)
         self.register_resource(r)
+        self.register_url(queue_url, r)
         return r
 
     def register_resource(self, r: Resource) -> None:
@@ -127,6 +143,12 @@ class AWS:
             logger.warning("%s is already a registered resource", r.arn)
         self.arns[r.arn] = r
         logger.info("registered resource %s", r.arn)
+
+    def register_url(self, url: Url, r: Resource) -> None:
+        if url in self.urls:
+            logger.warning("%s is already a registered URL", url)
+        self.urls[url] = r
+        logger.info("registered url for %s: %s", r.arn, url)
 
 
 class Deployment:
@@ -236,7 +258,6 @@ class AWSLambdaFunction(Resource):
 
 
 class AWSSQSQueue(Resource, LambdaEventSource):
-    aws: AWS
     aws: AWS
     region: Region
     account: Account
@@ -381,11 +402,12 @@ class CloudFormationStack:
                 prop = body["Properties"]
                 function_name = prop["FunctionName"]
                 event_source_arn = prop["EventSourceArn"]
+                assert isinstance(event_source_arn, str)
                 mapping = LambdaEventSourceMapping(
                     function_name=function_name, event_source_arn=event_source_arn
                 )
                 cast(
-                    LambdaEventSource, self.aws.by_arn(event_source_arn)
+                    LambdaEventSource, self.aws[event_source_arn]
                 ).add_event_source_mapping(mapping)
             case _:
                 raise UnknownResourceError(f"{rtype}")

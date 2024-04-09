@@ -40,14 +40,14 @@ def main(
     """
     IaC analysis tool.
     """
-    logging_level = logging.INFO
+    logging_level = logging.WARNING
     if debug:
         logging_level = logging.DEBUG
     setup_logging(logging_level)
 
 
 @app.command()
-def check(
+def analyze(
     cfn_template: Annotated[str, typer.Argument(help="CloudFormation template")],
 ):
     """
@@ -56,11 +56,27 @@ def check(
     aws = AWS()
     deployment = aws.add_deployment(Regions.us_east_1, Account("123"))
     deployment.from_cloudformation_template(path=cfn_template)
-    analyzer = Analyzer()
-    result = analyzer.analyze(aws)
+    analyzer = Analyzer(aws)
+    analyzer.constrain()
+    result = analyzer.solve()
     if result == AnalyzerResult.PASS:
         print("✅ Pass")
     elif result == AnalyzerResult.REJECT:
         print("❌ Reject")
     else:
         print("⚠️ The solver failed to solve the constraints")
+
+
+@app.command()
+def smt2(
+    cfn_template: Annotated[str, typer.Argument(help="CloudFormation template")],
+):
+    """
+    Check whether the usage estimates satisfy the constraints of the infrastructure.
+    """
+    aws = AWS()
+    deployment = aws.add_deployment(Regions.us_east_1, Account("123"))
+    deployment.from_cloudformation_template(path=cfn_template)
+    analyzer = Analyzer(aws)
+    analyzer.constrain()
+    print(analyzer.sexpr())
