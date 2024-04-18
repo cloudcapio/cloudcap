@@ -24,6 +24,17 @@ Now you should have access to `cloudcap`:
 cloudcap --help
 ```
 
+## Deploy
+
+should move this to the Makefile at some point
+
+poetry run pip install --upgrade -t package dist/*.whl
+cp deploy/lambda_function.py package
+zip -r ../artifact.zip . -x '*.pyc'
+
+manually upload the zip to S3 (should also be part of the makefile using aws cli)
+manually update the lambda source to be the s3 location of the zip (should be part of the clodformation file)
+
 ## Helpful documentations
 
 1. [Development workflow with Poetry and Typer CLI](https://typer.tiangolo.com/tutorial/package/)

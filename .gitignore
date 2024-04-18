@@ -2,6 +2,10 @@ docs/source
 
 # From https://raw.githubusercontent.com/github/gitignore/main/Python.gitignore
 
+#aws
+package/
+artifact.zip
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
