@@ -18,11 +18,13 @@ def write_template(aws: AWS, path: Optional[str | os.PathLike[Any]] = None) -> N
 
 def _write_template(aws: AWS, f: TextIO) -> None:
     for r in aws.arns.values():
+        # if r.logical_id:
+        #     f.write(f"# {r.logical_id}\n")
+        # template = {f"{r.arn}": {NREQUESTS: 0}}
         if r.logical_id:
-            f.write(f"# {r.logical_id}\n")
-        template = {f"{r.arn}": {NREQUESTS: 0}}
-        yaml.dump(template, f)
-        f.write("\n")
+            template = {f"{r.logical_id}": {NREQUESTS: 0}}
+            yaml.dump(template, f)
+            f.write("\n")
 
 
 def load(path: Optional[str | os.PathLike[Any]] = None) -> Estimates:

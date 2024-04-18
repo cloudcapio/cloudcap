@@ -62,6 +62,7 @@ def analyze(
     """
     Check whether the usage estimates satisfy the constraints of the infrastructure.
     """
+    # TODO: multiple CFN templates
 
     # simulate AWS deployments
     aws = AWS()
@@ -69,6 +70,7 @@ def analyze(
     deployment.from_cloudformation_template(path=cfn_template)
 
     # setup analysis
+    # TODO: custom plugins
     analyzer = Analyzer(aws)
     analyzer.constrain()
 

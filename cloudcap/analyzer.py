@@ -134,9 +134,15 @@ class Analyzer:
         return self.solver.sexpr()
 
     def add_estimates(self, estimates: Estimates):
-        for arn, metrics in estimates.items():
-            if arn not in self.aws.arns:
-                logger.error("%s does not exist in the infrastructure", arn)
-            resource = self.aws[arn]
+        # for arn, metrics in estimates.items():
+        # if arn not in self.aws.arns:
+        #     logger.error("%s does not exist in the infrastructure", arn)
+        # resource = self.aws[arn]
+        # for metric, estimate in metrics.items():
+        #     self.add(self[resource, metric] == estimate)
+        for logical_id, metrics in estimates.items():
+            if logical_id not in self.aws.logical_id_to_resource:
+                logger.error("%s does not exist in the infrastructure", logical_id)
+            resource = self.aws.logical_id_to_resource[logical_id]
             for metric, estimate in metrics.items():
                 self.add(self[resource, metric] == estimate)

@@ -6,6 +6,7 @@ from typing import Any, Optional, cast
 import cfn_flip  # type: ignore
 import networkx as nx
 import abc
+
 from cloudcap import INVALID_INPUT
 from cloudcap.cfn_template import CfnValue, exists_in_cfn_value
 import os
@@ -92,11 +93,14 @@ class AWS:
     arns: dict[Arn, Resource]
     urls: dict[Url, Resource]
     deployments: list[Deployment]
+    # TODO: this is a temporary mapping of logical_id to Resource
+    logical_id_to_resource: dict[str, Resource]
 
     def __init__(self):
-        self.arns = dict()
-        self.urls = dict()
-        self.deployments: list[Deployment] = list()
+        self.arns = {}
+        self.urls = {}
+        self.deployments = []
+        self.logical_id_to_resource = {}
 
     @property
     def resources(self) -> list[Resource]:
@@ -290,11 +294,11 @@ class AWSLambdaFunction(Resource):
     ) -> AWSLambdaFunction:
         prop = body["Properties"]
 
-        if "FunctionName" not in prop:
-            logger.error(
-                "To use cloudcap, FunctionName is a required parameter for AWS::Lambda::Function resource type."
-            )
-            sys.exit(INVALID_INPUT)
+        # if "FunctionName" not in prop:
+        #     logger.error(
+        #         "To use cloudcap, FunctionName is a required parameter for AWS::Lambda::Function resource type."
+        #     )
+        #     sys.exit(INVALID_INPUT)
 
         function_name: str = prop["FunctionName"]
         environment: Optional[dict[str, str]] = (
@@ -350,11 +354,11 @@ class AWSSQSQueue(Resource, LambdaEventSource):
         stack: CloudFormationStack, logical_id: str, body: CfnValue
     ) -> AWSSQSQueue:
         prop = body["Properties"]
-        if "QueueName" not in prop:
-            logger.error(
-                "To use cloudcap, QueueName is a required parameter for AWS::SQS::Queue resource type."
-            )
-            sys.exit(INVALID_INPUT)
+        # if "QueueName" not in prop:
+        #     logger.error(
+        #         "To use cloudcap, QueueName is a required parameter for AWS::SQS::Queue resource type."
+        #     )
+        #     sys.exit(INVALID_INPUT)
 
         queue_name: str = prop["QueueName"]
         r = AWSSQSQueue(
@@ -445,9 +449,13 @@ class CloudFormationStack:
         assert isinstance(rtype, str)
         match rtype:
             case ResourceTypes.AWS_Lambda_Function:
-                AWSLambdaFunction.from_cloudformation_stack(self, logical_id, body)
+                self.aws.logical_id_to_resource[logical_id] = (
+                    AWSLambdaFunction.from_cloudformation_stack(self, logical_id, body)
+                )
             case ResourceTypes.AWS_SQS_Queue:
-                AWSSQSQueue.from_cloudformation_stack(self, logical_id, body)
+                self.aws.logical_id_to_resource[logical_id] = (
+                    AWSSQSQueue.from_cloudformation_stack(self, logical_id, body)
+                )
             case ResourceTypes.AWS_Lambda_EventSourceMapping:
                 LambdaEventSourceMapping.from_cloudformation_stack(
                     self, logical_id, body
