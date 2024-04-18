@@ -206,6 +206,7 @@ class Resource(abc.ABC):
     def arn(self) -> Arn:
         raise NotImplementedError
 
+    # TODO this could be a fxn name or an ARN or (https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-lambda-eventsourcemapping.html#cfn-lambda-eventsourcemapping-functionname)
     def find_lambda_by_name(self, lambda_name: str) -> Optional[AWSLambdaFunction]:
         """
         Finding Lambda by name is a common thing.
