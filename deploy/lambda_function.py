@@ -1,5 +1,3 @@
-# TODO need to update this so it is actually calling cloudcap - files are passed in as strings in the POST request?
-
 from cloudcap import (
     SOLVER_ERROR,
     SOLVER_REJECT,
@@ -11,23 +9,44 @@ from cloudcap import (
 from cloudcap.analyzer import Analyzer, AnalyzerResult
 from cloudcap.aws import AWS, Regions, Account
 from cloudcap.logging import setup_logging
+import tempfile
 
 def lambda_handler(event, context):
-
     aws = AWS()
     deployment = aws.add_deployment(Regions.us_east_1, Account("123"))
-    deployment.from_cloudformation_template(path=event['cfn_template'])#TODO this isnt right....
+
+    # Write CloudFormation template to a temporary file
+    with tempfile.NamedTemporaryFile(mode='w', delete=False) as cfn_file:
+        cfn_file.write(event['cfn_template'])
+        cfn_file_path = cfn_file.name
+
+    deployment.from_cloudformation_template(path=cfn_file_path)
 
     # setup analysis
     analyzer = Analyzer(aws)
     analyzer.constrain()
 
+    # Write user estimates to a temporary file
+    with tempfile.NamedTemporaryFile(mode='w', delete=False) as estimates_file:
+        estimates_file.write(event['estimates'])
+        estimates_file_path = estimates_file.name
+
     # add user estimates
-    user_estimates = estimates.load(event['estimates_file']) #TODO this isnt right...
+    user_estimates = estimates.load(estimates_file_path)
     analyzer.add_estimates(user_estimates)
 
     # perform analysis
     result = analyzer.solve()
+
+    api_response = ""
+
+    if result == AnalyzerResult.PASS:
+        api_response = "PASS"
+    elif result == AnalyzerResult.REJECT:
+        api_response = "REJECT"
+    else:
+        api_response = "ERROR"
+
     return { 
-        'result' : result
+        'result' : api_response
     }

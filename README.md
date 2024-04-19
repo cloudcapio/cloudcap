@@ -30,10 +30,14 @@ should move this to the Makefile at some point
 
 poetry run pip install --upgrade -t package dist/*.whl
 cp deploy/lambda_function.py package
-zip -r ../artifact.zip . -x '*.pyc'
+cd package ; zip -r ../artifact.zip . -x '*.pyc'
 
 manually upload the zip to S3 (should also be part of the makefile using aws cli)
-manually update the lambda source to be the s3 location of the zip (should be part of the clodformation file)
+manually update the lambda from the uploaded zip (should also be part of the makefile using aws cli)
+
+also
+
+manually update the lambda source to be the s3 location of the zip (should be part of the clodformation file, once needs to happen once)
 
 ## Helpful documentations
 
