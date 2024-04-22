@@ -11,6 +11,10 @@ from cloudcap.aws import AWS, Regions, Account
 from cloudcap.logging import setup_logging
 import tempfile
 import json
+import yaml
+
+# If 'generateEstimatesTemplate' is True, generates an estimate template based on the deployment and returns it as json.
+# Otherwise, it loads the user-provided 'estimates', performs resource analysis, and returns the analysis result.
 
 def lambda_handler(event, context):
     aws = AWS()
@@ -22,6 +26,20 @@ def lambda_handler(event, context):
     with tempfile.NamedTemporaryFile(mode='w', delete=False) as cfn_file:
         cfn_file.write(loadedBody['cfn_template'])
         cfn_file_path = cfn_file.name
+    
+    if loadedBody.get('generateEstimatesTemplate'):
+        aws = AWS()
+        deployment = aws.add_deployment(Regions.us_east_1, Account("123"))
+        deployment.from_cloudformation_template(path=cfn_file_path)
+        templateString = estimates.template_to_string(aws)
+        return {
+            'statusCode': 200, 
+            'body': json.dumps({'result' : yaml.safe_load(templateString)}),
+            'headers': {
+                "Access-Control-Allow-Origin": "*"
+            },
+        }
+    
     deployment.from_cloudformation_template(path=cfn_file_path)
 
     # setup analysis
