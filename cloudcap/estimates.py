@@ -27,7 +27,7 @@ def template_to_string(aws: AWS) -> str:
     
     for r in aws.arns.values():
         if r.logical_id:
-            template = {f"{r.logical_id}": {"NREQUESTS": 0}}
+            template = {f"{r.logical_id}": {NREQUESTS: 0}}
             yaml.dump(template, temp_output)
             temp_output.write("\n")
     
