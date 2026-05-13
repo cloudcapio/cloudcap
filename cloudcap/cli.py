@@ -14,6 +14,7 @@ from cloudcap import (
 from cloudcap.analyzer import Analyzer, AnalyzerResult
 from cloudcap.aws import AWS, Regions, Account
 from cloudcap.logging import setup_logging
+from cloudcap.plugin_cache import save as cache_plugin, is_cached
 
 app = typer.Typer()
 
@@ -134,3 +135,31 @@ def estimates_template(
     deployment.from_cloudformation_template(path=cfn_template)
     estimates.write_template(aws)
     sys.exit(SUCCESS)
+
+
+@app.command()
+def generate_plugin(
+    resource_type: Annotated[str, typer.Argument(help="CFN resource type, e.g. AWS::Kinesis::Stream")],
+    force: Annotated[bool, typer.Option("--force", help="Regenerate even if already cached")] = False,
+):
+    """
+    Generate a plugin for an AWS resource type using the LLM.
+    """
+    from cloudcap.plugin_generator import generate
+    from cloudcap.plugin_validator import load
+
+    if is_cached(resource_type) and not force:
+        print(f"Plugin for {resource_type} already cached. Use --force to regenerate.")
+        sys.exit(SUCCESS)
+
+    print(f"Generating plugin for {resource_type}...")
+    code = generate(resource_type)
+
+    try:
+        cls = load(code)
+    except ValueError as e:
+        print(f"Generated code failed validation: {e}")
+        sys.exit(1)
+
+    path = cache_plugin(resource_type, code)
+    print(f"✅ Plugin {cls.__name__} saved to {path}")

@@ -1,7 +1,7 @@
 import os
 import sys
 from typing import Any, Optional, TextIO
-from cloudcap.analyzer import NREQUESTS
+from cloudcap.metrics import NREQUESTS
 from cloudcap.aws import AWS
 import yaml
 from io import StringIO
@@ -27,7 +27,7 @@ def template_to_string(aws: AWS) -> str:
     
     for r in aws.arns.values():
         if r.logical_id:
-            template = {f"{r.logical_id}": {"NREQUESTS": 0}}
+            template = {f"{r.logical_id}": {NREQUESTS: 0}}
             yaml.dump(template, temp_output)
             temp_output.write("\n")
     

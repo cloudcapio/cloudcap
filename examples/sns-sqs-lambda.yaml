@@ -1,0 +1,28 @@
+Resources:
+  OrdersTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: orders
+      Subscription:
+        - Endpoint: !GetAtt OrdersQueue.Arn
+          Protocol: sqs
+
+  OrdersQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: orders-queue
+
+  Mapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt OrdersQueue.Arn
+      FunctionName: !GetAtt ProcessorFunction.Arn
+
+  ProcessorFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: order-processor
+      Handler: index.handler
+      Runtime: nodejs18.x
+      Code:
+        ZipFile: "exports.handler = async (e) => {}"

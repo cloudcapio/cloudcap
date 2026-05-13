@@ -1,0 +1,31 @@
+Resources:
+  DataStream:
+    Type: AWS::Kinesis::Stream
+    Properties:
+      Name: data-stream
+      ShardCount: 2
+
+  ProcessorFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: stream-processor
+      Handler: index.handler
+      Runtime: nodejs18.x
+      Code:
+        ZipFile: "exports.handler = async (e) => {}"
+      Environment:
+        STREAM_ARN: !GetAtt DataStream.Arn
+
+  Mapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt DataStream.Arn
+      FunctionName: !GetAtt ProcessorFunction.Arn
+      StartingPosition: LATEST
+
+  OrderWorkflow:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: order-workflow
+      RoleArn: arn:aws:iam::123:role/StepFunctionsRole
+      DefinitionString: "{}"

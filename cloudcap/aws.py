@@ -1,6 +1,7 @@
 from __future__ import annotations
 from collections import defaultdict
 import logging
+import re
 import sys
 from typing import Any, Optional, cast
 import cfn_flip  # type: ignore
@@ -88,6 +89,42 @@ class ArnBuilder:
     def AWSSQSQueueArn(region: Region, account: Account, queue_name: str) -> Arn:
         return f"arn:{region.partition}:sqs:{region}:{account.account_id}:{queue_name}"
 
+    @staticmethod
+    def AWSLambdaAliasArn(
+        region: Region, account: Account, function_name: str, alias_name: str
+    ) -> Arn:
+        return f"arn:{region.partition}:lambda:{region}:{account.account_id}:function:{function_name}:{alias_name}"
+
+    @staticmethod
+    def AWSSNSTopicArn(region: Region, account: Account, topic_name: str) -> Arn:
+        return f"arn:{region.partition}:sns:{region}:{account.account_id}:{topic_name}"
+
+    @staticmethod
+    def AWSDynamoDBTableArn(region: Region, account: Account, table_name: str) -> Arn:
+        return f"arn:{region.partition}:dynamodb:{region}:{account.account_id}:table/{table_name}"
+
+    @staticmethod
+    def AWSAPIGatewayArn(region: Region, account: Account, api_name: str) -> Arn:
+        return f"arn:{region.partition}:execute-api:{region}:{account.account_id}:{api_name}"
+
+    @staticmethod
+    def AWSS3BucketArn(bucket_name: str) -> Arn:
+        return f"arn:aws:s3:::{bucket_name}"
+
+    @staticmethod
+    def AWSLambdaEventSourceMappingArn(
+        region: Region, account: Account, logical_id: str
+    ) -> Arn:
+        return f"arn:{region.partition}:lambda:{region}:{account.account_id}:event-source-mapping:{logical_id}"
+
+    @staticmethod
+    def AWSKinesisStreamArn(region: Region, account: Account, stream_name: str) -> Arn:
+        return f"arn:{region.partition}:kinesis:{region}:{account.account_id}:stream/{stream_name}"
+
+    @staticmethod
+    def AWSStepFunctionsStateMachineArn(region: Region, account: Account, name: str) -> Arn:
+        return f"arn:{region.partition}:states:{region}:{account.account_id}:stateMachine:{name}"
+
 
 class AWS:
     arns: dict[Arn, Resource]
@@ -146,6 +183,9 @@ class Deployment:
         self.account = account
 
     def from_cloudformation_template(self, path: str) -> None:
+        from cloudcap.resource_cache import load_all as load_cached_resource_classes
+        for cls in load_cached_resource_classes():
+            register_resource_class(cls)
         CloudFormationStack.from_file(self.aws, self.region, self.account, path)
 
 
@@ -188,6 +228,8 @@ class ResourceTypes:
     AWS_IAM_UserToGroupAddition = "AWS::IAM::UserToGroupAddition"
     AWS_IAM_VirtualMFADevice = "AWS::IAM::VirtualMFADevice"
     AWS_CDK_Metadata = "AWS::CDK::Metadata"
+    AWS_Kinesis_Stream = "AWS::Kinesis::Stream"
+    AWS_StepFunctions_StateMachine = "AWS::StepFunctions::StateMachine"
 
 
 class Resource(abc.ABC):
@@ -202,8 +244,8 @@ class Resource(abc.ABC):
         self.aws = aws
         self.region = region
         self.account = account
-        self.aws.register_resource(self)
         self.logical_id = logical_id
+        self.aws.register_resource(self)
 
     @property
     @abc.abstractmethod
@@ -238,13 +280,31 @@ class LambdaEventSource(abc.ABC):
         self.event_source_mappings.append(event_source_mapping)
 
 
-class LambdaEventSourceMapping:
+class LambdaEventSourceMapping(Resource):
+    cfn_type = "AWS::Lambda::EventSourceMapping"
     function_name: str
     event_source_arn: Arn
 
-    def __init__(self, function_name: str, event_source_arn: Arn) -> None:
+    def __init__(
+        self,
+        aws: AWS,
+        region: Region,
+        account: Account,
+        function_name: str,
+        event_source_arn: Arn,
+        logical_id: Optional[str] = None,
+    ) -> None:
         self.function_name = function_name
         self.event_source_arn = event_source_arn
+        super().__init__(aws, region, account, logical_id=logical_id)
+        logger.debug("new LambdaEventSourceMapping: %s", self.arn)
+
+    @property
+    def arn(self) -> Arn:
+        suffix = self.logical_id if self.logical_id is not None else self.function_name
+        return ArnBuilder.AWSLambdaEventSourceMappingArn(
+            self.region, self.account, suffix
+        )
 
     @staticmethod
     def from_cloudformation_stack(
@@ -253,17 +313,25 @@ class LambdaEventSourceMapping:
         prop = body["Properties"]
         function_name = prop["FunctionName"]
         event_source_arn = prop["EventSourceArn"]
+        assert isinstance(function_name, str)
         assert isinstance(event_source_arn, str)
         mapping = LambdaEventSourceMapping(
-            function_name=function_name, event_source_arn=event_source_arn
+            aws=stack.aws,
+            region=stack.region,
+            account=stack.account,
+            function_name=function_name,
+            event_source_arn=event_source_arn,
+            logical_id=logical_id,
         )
         cast(LambdaEventSource, stack.aws[event_source_arn]).add_event_source_mapping(
             mapping
         )
+        stack.refs[logical_id] = str(mapping.arn)
         return mapping
 
 
 class AWSLambdaFunction(Resource):
+    cfn_type = "AWS::Lambda::Function"
     function_name: str
     # A function's environment variable settings
     environment: dict[str, str]
@@ -314,7 +382,7 @@ class AWSLambdaFunction(Resource):
             logical_id=logical_id,
         )
         stack.refs[logical_id] = str(r.arn)
-        stack.atts[logical_id]["Arn"] = r.function_name
+        stack.atts[logical_id]["Arn"] = str(r.arn)
         # INFO:
         # hidden atts:
         #   - SnapStartResponse.ApplyOn
@@ -322,12 +390,449 @@ class AWSLambdaFunction(Resource):
         return r
 
 
+class AWSLambdaAlias(Resource):
+    cfn_type = "AWS::Lambda::Alias"
+    function_name: str
+    alias_name: str
+    function_version: str
+
+    def __init__(
+        self,
+        aws: AWS,
+        region: Region,
+        account: Account,
+        function_name: str,
+        alias_name: str,
+        function_version: str,
+        logical_id: Optional[str] = None,
+    ):
+        self.function_name = function_name
+        self.alias_name = alias_name
+        self.function_version = function_version
+        super().__init__(aws, region, account, logical_id=logical_id)
+        logger.debug("new AWSLambdaAlias: %s", self.arn)
+
+    @property
+    def arn(self) -> Arn:
+        return ArnBuilder.AWSLambdaAliasArn(
+            self.region, self.account, self.function_name, self.alias_name
+        )
+
+    @staticmethod
+    def from_cloudformation_stack(
+        stack: CloudFormationStack, logical_id: str, body: CfnValue
+    ) -> AWSLambdaAlias:
+        prop = body["Properties"]
+        function_name = prop["FunctionName"]
+        alias_name = prop["Name"]
+        function_version = prop["FunctionVersion"]
+        assert isinstance(function_name, str)
+        assert isinstance(alias_name, str)
+        assert isinstance(function_version, str)
+        r = AWSLambdaAlias(
+            stack.aws,
+            stack.region,
+            stack.account,
+            function_name,
+            alias_name,
+            function_version,
+            logical_id=logical_id,
+        )
+        stack.refs[logical_id] = str(r.arn)
+        stack.atts[logical_id]["Arn"] = str(r.arn)
+        stack.atts[logical_id]["Name"] = r.alias_name
+        return r
+
+
+class AWSSNSTopic(Resource):
+    cfn_type = "AWS::SNS::Topic"
+    topic_name: str
+    subscriptions: list[str]
+
+    def __init__(
+        self,
+        aws: AWS,
+        region: Region,
+        account: Account,
+        topic_name: str,
+        subscriptions: Optional[list[str]] = None,
+        logical_id: Optional[str] = None,
+    ):
+        self.topic_name = topic_name
+        self.subscriptions = subscriptions if subscriptions else []
+        super().__init__(aws, region, account, logical_id=logical_id)
+        logger.debug("new AWSSNSTopic: %s", self.arn)
+
+    @property
+    def arn(self) -> Arn:
+        return ArnBuilder.AWSSNSTopicArn(self.region, self.account, self.topic_name)
+
+    @staticmethod
+    def from_cloudformation_stack(
+        stack: CloudFormationStack, logical_id: str, body: CfnValue
+    ) -> AWSSNSTopic:
+        prop = body["Properties"]
+        topic_name = prop["TopicName"] if "TopicName" in prop else logical_id
+        subscriptions_raw = prop["Subscription"] if "Subscription" in prop else []
+        assert isinstance(topic_name, str)
+        assert isinstance(subscriptions_raw, list)
+        subscriptions: list[str] = []
+        for sub in subscriptions_raw:
+            if isinstance(sub, dict) and "Endpoint" in sub:
+                endpoint = sub["Endpoint"]
+                if isinstance(endpoint, str):
+                    subscriptions.append(endpoint)
+        r = AWSSNSTopic(
+            stack.aws,
+            stack.region,
+            stack.account,
+            topic_name,
+            subscriptions=subscriptions,
+            logical_id=logical_id,
+        )
+        stack.refs[logical_id] = str(r.arn)
+        stack.atts[logical_id]["Arn"] = str(r.arn)
+        return r
+
+
+class AWSSNSSubscription(Resource):
+    cfn_type = "AWS::SNS::Subscription"
+    topic_arn: str
+    protocol: str
+    endpoint: str
+
+    def __init__(
+        self,
+        aws: AWS,
+        region: Region,
+        account: Account,
+        topic_arn: str,
+        protocol: str,
+        endpoint: str,
+        logical_id: Optional[str] = None,
+    ):
+        self.topic_arn = topic_arn
+        self.protocol = protocol
+        self.endpoint = endpoint
+        super().__init__(aws, region, account, logical_id=logical_id)
+        logger.debug("new AWSSNSSubscription: %s", self.arn)
+
+    @property
+    def arn(self) -> Arn:
+        suffix = self.logical_id if self.logical_id is not None else self.endpoint
+        return (
+            f"arn:{self.region.partition}:sns:{self.region}:"
+            f"{self.account.account_id}:subscription:{suffix}"
+        )
+
+    @staticmethod
+    def from_cloudformation_stack(
+        stack: CloudFormationStack, logical_id: str, body: CfnValue
+    ) -> AWSSNSSubscription:
+        prop = body["Properties"]
+        topic_arn = prop["TopicArn"]
+        protocol = prop["Protocol"]
+        endpoint = prop["Endpoint"]
+        assert isinstance(topic_arn, str)
+        assert isinstance(protocol, str)
+        assert isinstance(endpoint, str)
+        r = AWSSNSSubscription(
+            stack.aws,
+            stack.region,
+            stack.account,
+            topic_arn,
+            protocol,
+            endpoint,
+            logical_id=logical_id,
+        )
+        stack.refs[logical_id] = str(r.arn)
+        stack.atts[logical_id]["Arn"] = str(r.arn)
+        return r
+
+
+class AWSLambdaPermission(Resource):
+    function_name: str
+    principal: str
+    source_arn: Optional[str]
+
+    def __init__(
+        self,
+        aws: AWS,
+        region: Region,
+        account: Account,
+        function_name: str,
+        principal: str,
+        source_arn: Optional[str] = None,
+        logical_id: Optional[str] = None,
+    ):
+        self.function_name = function_name
+        self.principal = principal
+        self.source_arn = source_arn
+        super().__init__(aws, region, account, logical_id=logical_id)
+        logger.debug("new AWSLambdaPermission: %s", self.arn)
+
+    @property
+    def arn(self) -> Arn:
+        return (
+            f"arn:{self.region.partition}:lambda:{self.region}:"
+            f"{self.account.account_id}:permission:{self.function_name}:{self.principal}"
+        )
+
+    @staticmethod
+    def from_cloudformation_stack(
+        stack: CloudFormationStack, logical_id: str, body: CfnValue
+    ) -> AWSLambdaPermission:
+        prop = body["Properties"]
+        function_name = prop["FunctionName"]
+        principal = prop["Principal"]
+        source_arn = prop.get("SourceArn", None)
+        assert isinstance(function_name, str)
+        assert isinstance(principal, str)
+        assert source_arn is None or isinstance(source_arn, str)
+        r = AWSLambdaPermission(
+            stack.aws,
+            stack.region,
+            stack.account,
+            function_name,
+            principal,
+            source_arn=source_arn,
+            logical_id=logical_id,
+        )
+        stack.refs[logical_id] = str(r.arn)
+        return r
+
+
+class AWSDynamoDBTable(Resource):
+    cfn_type = "AWS::DynamoDB::Table"
+    table_name: str
+
+    def __init__(
+        self,
+        aws: AWS,
+        region: Region,
+        account: Account,
+        table_name: str,
+        logical_id: Optional[str] = None,
+    ):
+        self.table_name = table_name
+        super().__init__(aws, region, account, logical_id=logical_id)
+        logger.debug("new AWSDynamoDBTable: %s", self.arn)
+
+    @property
+    def arn(self) -> Arn:
+        return ArnBuilder.AWSDynamoDBTableArn(
+            self.region, self.account, self.table_name
+        )
+
+    @staticmethod
+    def from_cloudformation_stack(
+        stack: CloudFormationStack, logical_id: str, body: CfnValue
+    ) -> AWSDynamoDBTable:
+        prop = body["Properties"]
+        table_name = prop["TableName"] if "TableName" in prop else logical_id
+        assert isinstance(table_name, str)
+        r = AWSDynamoDBTable(
+            stack.aws,
+            stack.region,
+            stack.account,
+            table_name,
+            logical_id=logical_id,
+        )
+        stack.refs[logical_id] = table_name
+        stack.atts[logical_id]["Arn"] = str(r.arn)
+        stack.atts[logical_id]["Name"] = r.table_name
+        return r
+
+
+class AWSAPIGatewayRestApi(Resource):
+    cfn_type = "AWS::ApiGateway::RestApi"
+    api_name: str
+
+    def __init__(
+        self,
+        aws: AWS,
+        region: Region,
+        account: Account,
+        api_name: str,
+        logical_id: Optional[str] = None,
+    ):
+        self.api_name = api_name
+        super().__init__(aws, region, account, logical_id=logical_id)
+        logger.debug("new AWSAPIGatewayRestApi: %s", self.arn)
+
+    @property
+    def arn(self) -> Arn:
+        return ArnBuilder.AWSAPIGatewayArn(self.region, self.account, self.api_name)
+
+    @staticmethod
+    def from_cloudformation_stack(
+        stack: CloudFormationStack, logical_id: str, body: CfnValue
+    ) -> AWSAPIGatewayRestApi:
+        prop = body["Properties"]
+        api_name = prop.get("Name", logical_id)
+        assert isinstance(api_name, str)
+        r = AWSAPIGatewayRestApi(
+            stack.aws, stack.region, stack.account, api_name, logical_id=logical_id
+        )
+        stack.refs[logical_id] = str(r.arn)
+        stack.atts[logical_id]["RootResourceId"] = logical_id
+        return r
+
+
+class AWSAPIGatewayResource(Resource):
+    cfn_type = "AWS::ApiGateway::Resource"
+    rest_api_arn: Arn
+    path_part: str
+
+    def __init__(
+        self,
+        aws: AWS,
+        region: Region,
+        account: Account,
+        rest_api_arn: Arn,
+        path_part: str,
+        logical_id: Optional[str] = None,
+    ):
+        self.rest_api_arn = rest_api_arn
+        self.path_part = path_part
+        super().__init__(aws, region, account, logical_id=logical_id)
+        logger.debug("new AWSAPIGatewayResource: %s", self.arn)
+
+    @property
+    def arn(self) -> Arn:
+        suffix = self.logical_id if self.logical_id is not None else self.path_part
+        return (
+            f"arn:{self.region.partition}:execute-api:{self.region}:"
+            f"{self.account.account_id}:resource:{suffix}"
+        )
+
+    @staticmethod
+    def from_cloudformation_stack(
+        stack: CloudFormationStack, logical_id: str, body: CfnValue
+    ) -> AWSAPIGatewayResource:
+        prop = body["Properties"]
+        rest_api_arn = prop.get("RestApiId", "")
+        path_part = prop.get("PathPart", logical_id)
+        assert isinstance(rest_api_arn, str)
+        assert isinstance(path_part, str)
+        r = AWSAPIGatewayResource(
+            stack.aws,
+            stack.region,
+            stack.account,
+            rest_api_arn,
+            path_part,
+            logical_id=logical_id,
+        )
+        stack.refs[logical_id] = str(r.arn)
+        stack.atts[logical_id]["ResourceId"] = str(r.arn)
+        return r
+
+
+class AWSAPIGatewayMethod(Resource):
+    cfn_type = "AWS::ApiGateway::Method"
+    rest_api_arn: Arn
+    http_method: str
+    integration_uri: Optional[str]
+
+    def __init__(
+        self,
+        aws: AWS,
+        region: Region,
+        account: Account,
+        rest_api_arn: Arn,
+        http_method: str,
+        integration_uri: Optional[str] = None,
+        logical_id: Optional[str] = None,
+    ):
+        self.rest_api_arn = rest_api_arn
+        self.http_method = http_method.upper()
+        self.integration_uri = integration_uri
+        super().__init__(aws, region, account, logical_id=logical_id)
+        logger.debug("new AWSAPIGatewayMethod: %s", self.arn)
+
+    @property
+    def arn(self) -> Arn:
+        suffix = self.logical_id if self.logical_id is not None else self.http_method
+        return (
+            f"arn:{self.region.partition}:execute-api:{self.region}:"
+            f"{self.account.account_id}:method:{suffix}"
+        )
+
+    @staticmethod
+    def from_cloudformation_stack(
+        stack: CloudFormationStack, logical_id: str, body: CfnValue
+    ) -> AWSAPIGatewayMethod:
+        prop = body["Properties"]
+        rest_api_arn = prop.get("RestApiId", "")
+        http_method = prop.get("HttpMethod", "")
+        integration = prop.get("Integration", {})
+        integration_uri: Optional[str] = None
+        if isinstance(integration, dict):
+            uri = integration.get("Uri")
+            if isinstance(uri, str):
+                integration_uri = uri
+        assert isinstance(rest_api_arn, str)
+        assert isinstance(http_method, str)
+        r = AWSAPIGatewayMethod(
+            stack.aws,
+            stack.region,
+            stack.account,
+            rest_api_arn,
+            http_method,
+            integration_uri=integration_uri,
+            logical_id=logical_id,
+        )
+        stack.refs[logical_id] = str(r.arn)
+        return r
+
+
+class AWSS3Bucket(Resource):
+    cfn_type = "AWS::S3::Bucket"
+    bucket_name: str
+
+    def __init__(
+        self,
+        aws: AWS,
+        region: Region,
+        account: Account,
+        bucket_name: str,
+        logical_id: Optional[str] = None,
+    ):
+        self.bucket_name = bucket_name
+        super().__init__(aws, region, account, logical_id=logical_id)
+        # Register bucket name so Lambda env vars referencing it by name are found.
+        aws.register_url(bucket_name, self)
+        logger.debug("new AWSS3Bucket: %s", self.arn)
+
+    @property
+    def arn(self) -> Arn:
+        return ArnBuilder.AWSS3BucketArn(self.bucket_name)
+
+    @staticmethod
+    def from_cloudformation_stack(
+        stack: CloudFormationStack, logical_id: str, body: CfnValue
+    ) -> AWSS3Bucket:
+        prop = body["Properties"]
+        bucket_name = prop.get("BucketName", logical_id)
+        assert isinstance(bucket_name, str)
+        r = AWSS3Bucket(
+            stack.aws, stack.region, stack.account, bucket_name, logical_id=logical_id
+        )
+        stack.refs[logical_id] = r.bucket_name
+        stack.atts[logical_id]["Arn"] = str(r.arn)
+        stack.atts[logical_id]["DomainName"] = f"{r.bucket_name}.s3.amazonaws.com"
+        return r
+
+
 class AWSSQSQueue(Resource, LambdaEventSource):
+    cfn_type = "AWS::SQS::Queue"
     aws: AWS
     region: Region
     account: Account
     queue_name: str
     queue_url: Url
+    fifo_queue: bool
+    content_based_deduplication: bool
 
     def __init__(
         self,
@@ -335,15 +840,23 @@ class AWSSQSQueue(Resource, LambdaEventSource):
         region: Region,
         account: Account,
         queue_name: str,
+        fifo_queue: bool = False,
+        content_based_deduplication: bool = False,
         logical_id: Optional[str] = None,
     ):
         self.queue_name = queue_name
+        self.fifo_queue = fifo_queue
+        self.content_based_deduplication = content_based_deduplication
         self.queue_url = (
             f"https://sqs.{region}.amazonaws.com/{account.account_id}/{queue_name}"
         )
         super().__init__(aws, region, account, logical_id=logical_id)
         self.aws.register_url(self.queue_url, self)
         logger.debug("new AWSSQSQueue: %s. URL: %s", self.arn, self.queue_url)
+
+    @property
+    def deduplicates(self) -> bool:
+        return self.fifo_queue and self.content_based_deduplication
 
     @property
     def arn(self) -> Arn:
@@ -354,21 +867,79 @@ class AWSSQSQueue(Resource, LambdaEventSource):
         stack: CloudFormationStack, logical_id: str, body: CfnValue
     ) -> AWSSQSQueue:
         prop = body["Properties"]
-        # if "QueueName" not in prop:
-        #     logger.error(
-        #         "To use cloudcap, QueueName is a required parameter for AWS::SQS::Queue resource type."
-        #     )
-        #     sys.exit(INVALID_INPUT)
-
         queue_name: str = prop["QueueName"]
+        fifo_queue: bool = bool(prop.get("FifoQueue", False))
+        content_based_deduplication: bool = bool(
+            prop.get("ContentBasedDeduplication", False)
+        )
         r = AWSSQSQueue(
-            stack.aws, stack.region, stack.account, queue_name, logical_id=logical_id
+            stack.aws,
+            stack.region,
+            stack.account,
+            queue_name,
+            fifo_queue=fifo_queue,
+            content_based_deduplication=content_based_deduplication,
+            logical_id=logical_id,
         )
         stack.refs[logical_id] = r.queue_url
         stack.atts[logical_id]["Arn"] = str(r.arn)
         stack.atts[logical_id]["QueueName"] = r.queue_name
         stack.atts[logical_id]["QueueUrl"] = r.queue_url
         return r
+
+
+class AWSKinesisStream(Resource, LambdaEventSource):
+    cfn_type = "AWS::Kinesis::Stream"
+    stream_name: str
+
+    def __init__(self, aws: AWS, region: Region, account: Account, stream_name: str, logical_id: Optional[str] = None) -> None:
+        self.stream_name = stream_name
+        super().__init__(aws, region, account, logical_id=logical_id)
+
+    @property
+    def arn(self) -> Arn:
+        return ArnBuilder.AWSKinesisStreamArn(self.region, self.account, self.stream_name)
+
+    @staticmethod
+    def from_cloudformation_stack(stack: CloudFormationStack, logical_id: str, body: CfnValue) -> AWSKinesisStream:
+        prop = body.get("Properties", {})
+        stream_name = prop.get("Name", logical_id)
+        assert isinstance(stream_name, str)
+        r = AWSKinesisStream(stack.aws, stack.region, stack.account, stream_name, logical_id=logical_id)
+        stack.refs[logical_id] = str(r.arn)
+        stack.atts[logical_id]["Arn"] = str(r.arn)
+        return r
+
+
+class AWSStepFunctionsStateMachine(Resource):
+    cfn_type = "AWS::StepFunctions::StateMachine"
+    name: str
+
+    def __init__(self, aws: AWS, region: Region, account: Account, name: str, logical_id: Optional[str] = None) -> None:
+        self.name = name
+        super().__init__(aws, region, account, logical_id=logical_id)
+
+    @property
+    def arn(self) -> Arn:
+        return ArnBuilder.AWSStepFunctionsStateMachineArn(self.region, self.account, self.name)
+
+    @staticmethod
+    def from_cloudformation_stack(stack: CloudFormationStack, logical_id: str, body: CfnValue) -> AWSStepFunctionsStateMachine:
+        prop = body.get("Properties", {})
+        name = prop.get("StateMachineName", logical_id)
+        assert isinstance(name, str)
+        r = AWSStepFunctionsStateMachine(stack.aws, stack.region, stack.account, name, logical_id=logical_id)
+        stack.refs[logical_id] = str(r.arn)
+        stack.atts[logical_id]["Arn"] = str(r.arn)
+        return r
+
+
+_dynamic_resource_registry: dict[str, type[Resource]] = {}
+
+
+def register_resource_class(cls: type[Resource]) -> None:
+    if hasattr(cls, "cfn_type"):
+        _dynamic_resource_registry[cls.cfn_type] = cls
 
 
 ##### CloudFormation
@@ -447,21 +1018,76 @@ class CloudFormationStack:
         body = self.resolve_intrinsic_functions(body)
         rtype = body["Type"]
         assert isinstance(rtype, str)
+
+        if rtype in _dynamic_resource_registry:
+            cls = _dynamic_resource_registry[rtype]
+            try:
+                self.aws.logical_id_to_resource[logical_id] = cls.from_cloudformation_stack(self, logical_id, body)
+            except Exception as e:
+                logger.warning("Failed to parse %s (%s): %s", logical_id, rtype, e)
+            return
+
         match rtype:
-            case ResourceTypes.AWS_Lambda_Function:
+            case ResourceTypes.AWS_Lambda_Function | ResourceTypes.AWS_Serverless_Function:
                 self.aws.logical_id_to_resource[logical_id] = (
                     AWSLambdaFunction.from_cloudformation_stack(self, logical_id, body)
+                )
+            case ResourceTypes.AWS_Lambda_Alias:
+                self.aws.logical_id_to_resource[logical_id] = (
+                    AWSLambdaAlias.from_cloudformation_stack(self, logical_id, body)
                 )
             case ResourceTypes.AWS_SQS_Queue:
                 self.aws.logical_id_to_resource[logical_id] = (
                     AWSSQSQueue.from_cloudformation_stack(self, logical_id, body)
                 )
-            case ResourceTypes.AWS_Lambda_EventSourceMapping:
-                LambdaEventSourceMapping.from_cloudformation_stack(
-                    self, logical_id, body
+            case ResourceTypes.AWS_SNS_Topic:
+                self.aws.logical_id_to_resource[logical_id] = (
+                    AWSSNSTopic.from_cloudformation_stack(self, logical_id, body)
                 )
+            case ResourceTypes.AWS_SNS_Subscription:
+                self.aws.logical_id_to_resource[logical_id] = (
+                    AWSSNSSubscription.from_cloudformation_stack(self, logical_id, body)
+                )
+            case ResourceTypes.AWS_Lambda_Permission:
+                pass  # non-dataflow resource, intentionally omitted from graph
+            case ResourceTypes.AWS_DynamoDB_Table:
+                self.aws.logical_id_to_resource[logical_id] = (
+                    AWSDynamoDBTable.from_cloudformation_stack(self, logical_id, body)
+                )
+            case ResourceTypes.AWS_Lambda_EventSourceMapping:
+                self.aws.logical_id_to_resource[logical_id] = (
+                    LambdaEventSourceMapping.from_cloudformation_stack(
+                        self, logical_id, body
+                    )
+                )
+            case ResourceTypes.AWS_S3_Bucket:
+                self.aws.logical_id_to_resource[logical_id] = (
+                    AWSS3Bucket.from_cloudformation_stack(self, logical_id, body)
+                )
+            case ResourceTypes.AWS_ApiGateway_RestApi:
+                self.aws.logical_id_to_resource[logical_id] = (
+                    AWSAPIGatewayRestApi.from_cloudformation_stack(self, logical_id, body)
+                )
+            case ResourceTypes.AWS_ApiGateway_Resource:
+                self.aws.logical_id_to_resource[logical_id] = (
+                    AWSAPIGatewayResource.from_cloudformation_stack(self, logical_id, body)
+                )
+            case ResourceTypes.AWS_ApiGateway_Method:
+                self.aws.logical_id_to_resource[logical_id] = (
+                    AWSAPIGatewayMethod.from_cloudformation_stack(self, logical_id, body)
+                )
+            case ResourceTypes.AWS_Kinesis_Stream:
+                self.aws.logical_id_to_resource[logical_id] = (
+                    AWSKinesisStream.from_cloudformation_stack(self, logical_id, body)
+                )
+            case ResourceTypes.AWS_StepFunctions_StateMachine:
+                self.aws.logical_id_to_resource[logical_id] = (
+                    AWSStepFunctionsStateMachine.from_cloudformation_stack(self, logical_id, body)
+                )
+            case ResourceTypes.AWS_ApiGateway_Deployment | ResourceTypes.AWS_S3_BucketPolicy:
+                pass  # non-dataflow, no constraints
             case _:
-                raise UnknownResourceError(f"{rtype}")
+                logger.warning("Skipping unsupported resource type: %s", rtype)
 
     def resolve_intrinsic_functions(self, body: CfnValue) -> CfnValue:
         """

@@ -4,7 +4,8 @@ import enum
 import logging
 from typing import Any, TYPE_CHECKING
 from cloudcap.plugins import Plugin, builtin_plugins
-from cloudcap.metrics import NREQUESTS, Metric
+from cloudcap.plugin_cache import load_all as load_cached_plugins
+from cloudcap.metrics import Metric
 
 from z3 import *  # type: ignore
 from cloudcap.aws import AWS, Resource
@@ -48,7 +49,7 @@ class Analyzer:
     def __init__(self, aws: AWS) -> None:
         # initialize with builtin plugins
         self.aws = aws
-        self.plugins = [p(self) for p in builtin_plugins.plugins]
+        self.plugins = [p(self) for p in builtin_plugins.plugins + load_cached_plugins()]
         self.solver = z3.Solver()
         self.node_variables = {}
         self.edge_variables = {}
@@ -56,7 +57,32 @@ class Analyzer:
     def add_plugin(self, plugin: type[Plugin]) -> None:
         self.plugins.append(plugin(self))
 
+    def _generate_missing_plugins(self) -> None:
+        covered = {p.handles for p in self.plugins if hasattr(p, "handles")}
+        seen_types: set[type] = set()
+        for resource in self.aws.arns.values():
+            rtype = type(resource)
+            if rtype in covered or rtype in seen_types or not hasattr(rtype, "cfn_type"):
+                continue
+            seen_types.add(rtype)
+            cfn_type = rtype.cfn_type
+            try:
+                from cloudcap.plugin_cache import save, is_cached, load_all
+                from cloudcap.plugin_validator import load as validate
+                if is_cached(cfn_type):
+                    continue  # already loaded at init via load_cached_plugins()
+                logger.info("No plugin for %s — generating via LLM", cfn_type)
+                from cloudcap.plugin_generator import generate
+                code = generate(cfn_type)
+                cls = validate(code)
+                save(cfn_type, code)
+                self.plugins.append(cls(self))
+                logger.info("Generated and loaded plugin %s", cls.__name__)
+            except Exception as e:
+                logger.warning("Failed to generate plugin for %s: %s", cfn_type, e)
+
     def constrain(self) -> None:
+        self._generate_missing_plugins()
         # call all plugins
         for plugin in self.plugins:
             plugin.constrain()
@@ -71,22 +97,9 @@ class Analyzer:
         for (resource, metric), incomings in incomings_map.items():
             self.add(self[resource, metric] == sum(incomings[1:], incomings[0]))
 
-        # generate basic constraints
-        # TODO: only doing NREQUESTS >= 0 for now
-        self.add(
-            *[
-                var >= 0
-                for (_, metric), var in self.node_variables.items()
-                if metric == NREQUESTS
-            ]
-        )
-        self.add(
-            *[
-                var >= 0
-                for (_, _, metric), var in self.edge_variables.items()
-                if metric == NREQUESTS
-            ]
-        )
+        # generate basic constraints: all usage counts are non-negative
+        self.add(*[var >= 0 for var in self.node_variables.values()])
+        self.add(*[var >= 0 for var in self.edge_variables.values()])
 
     def solve(self) -> AnalyzerResult:
         return AnalyzerResult.from_z3_check_result(self.solver.check())
